@@ -545,13 +545,20 @@ a.task-badge:hover { text-decoration: underline; }
   font-size: var(--type-xs); font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
   padding: 1px 5px; border-radius: 3px; border: 1px solid var(--line); color: var(--muted);
 }
-/* Vocabulary comes from EPIC_STATUSES / TASK_STATUSES in ccstore.py. */
+/* Vocabulary comes from BOARD_STATUSES in app.js, which mirrors
+   ccboard.SELECTABLE_STATUSES. Anything without a rule here falls back to the
+   muted base chip, which is the right default for backlog and open. */
 .status-chip.in_progress {
   color: var(--state-running); border-color: color-mix(in srgb, var(--state-running) 42%, transparent);
 }
 .status-chip.done { color: var(--safe); border-color: color-mix(in srgb, var(--safe) 40%, transparent); }
 .status-chip.blocked { color: var(--state-blocked); border-color: color-mix(in srgb, var(--state-blocked) 42%, transparent); }
-.status-chip.archived, .status-chip.cancelled { color: var(--muted); opacity: .75; }
+/* Set aside or gone: dimmer than the base chip. These two replace the rules for
+   `archived` and `cancelled`, which the board rewrite retired - archived became
+   done (styled above) and cancelled became deleted, so those selectors could no
+   longer match anything. `deleted` never appears in the status CONTROL, but it
+   does appear in read-only chips elsewhere. */
+.status-chip.parked, .status-chip.deleted { color: var(--muted); opacity: .75; }
 
 /* A <select> dressed as a chip, so every status is reachable - including blocked,
    which a forward-only cycle could never enter. Native appearance is dropped but
@@ -1032,7 +1039,7 @@ select, .rin, .btn, .ta {
 .status-chip.in_progress, .status-chip.running { background: color-mix(in srgb, var(--state-running) 8%, var(--panel)); }
 .status-chip.blocked { background: color-mix(in srgb, var(--state-blocked) 8%, var(--panel)); }
 .status-chip.failed { background: color-mix(in srgb, var(--state-failed) 8%, var(--panel)); }
-.status-chip.archived, .status-chip.cancelled { opacity: 1; }
+.status-chip.parked, .status-chip.deleted { opacity: 1; }
 .nav-badge.alert { background: var(--state-failed); color: var(--bg); }
 
 /* Include native controls, links, disclosure summaries, chips and future
