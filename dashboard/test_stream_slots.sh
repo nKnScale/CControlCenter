@@ -88,7 +88,7 @@ echo "  $count agents, $ROUNDS rounds = $opens abandoned opens against a pool of
 started=$SECONDS
 for _round in $(seq 1 "$ROUNDS"); do
   for name in $names; do
-    timeout 1 curl -sN --max-time 2 "$BASE/api/stream/$name?tail=512" >/dev/null 2>&1 &
+    curl --max-time 1 -sN "$BASE/api/stream/$name?tail=512" >/dev/null 2>&1 &
   done
   sleep 0.2
 done

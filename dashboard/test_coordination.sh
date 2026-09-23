@@ -261,7 +261,7 @@ for i in $(seq 1 12); do
   ) &
 done
 wait
-count="$(wc -l < "$winners")"
+count="$(count_lines < "$winners")"
 if [ "$count" -eq 1 ]; then
   ok "exactly one of 12 concurrent claimants won ($(cat "$winners"))"
 else

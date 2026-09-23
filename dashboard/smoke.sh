@@ -65,7 +65,7 @@ echo '--- multiplexed stream (one connection for every agent) ---'
 # A browser allows ~6 connections per host, and an SSE stream holds one open. With seven
 # panes the seventh could never connect and two panes traded places every second. All
 # agents now share /api/stream-all, so pane count is no longer capped by the browser.
-mux="$(timeout 6 curl -sN "$BASE/api/stream-all?tail=512" 2>/dev/null)"
+mux="$(curl --max-time 6 -sN "$BASE/api/stream-all?tail=512" 2>/dev/null)"
 check 'stream-all returns frames' true "$([ -n "$mux" ] && echo true || echo false)"
 # LIVE agents only. A stale entry is an agent whose tmux session is gone; it has no
 # log to follow, so the client deliberately opens no stream for it, and comparing
@@ -159,11 +159,19 @@ if [ -z "$eid" ]; then
   printf '  FAIL  epic create returned no id\n'; fail=$((fail + 1))
 else
   printf '  ok    %-36s id=%s\n' 'epic created' "$eid"; pass=$((pass + 1))
+  # Request bodies inside a check are built into $body first, and that is not
+  # style. bash 3.2 - what macOS ships - mis-parses an inline "{\"k\":\"v\",...}"
+  # literal when the command substitution holding it sits in ARGUMENT position,
+  # as in `check label want "$(jpost ...)"`: it strips the braces and truncates at
+  # the first comma, so the server gets `"kind":"epic"`. The same literal in a
+  # plain assignment parses correctly under 3.2 and 5 alike.
+  body="{\"epic_id\":$eid,\"title\":\"smoke task\",\"agent\":\"codex\"}"
   check 'task created' 'smoke task' \
-    "$(jpost api/tasks "{\"epic_id\":$eid,\"title\":\"smoke task\",\"agent\":\"codex\"}" \
+    "$(jpost api/tasks "$body" \
        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("title",""))')"
+  body="{\"kind\":\"epic\",\"id\":$eid,\"status\":\"in_progress\"}"
   check 'epic -> in_progress' 'in_progress' \
-    "$(jpost api/status "{\"kind\":\"epic\",\"id\":$eid,\"status\":\"in_progress\"}" \
+    "$(jpost api/status "$body" \
        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')"
   check 'epic reads back with its task' 'in_progress 1' \
     "$(curl -s "$BASE/api/epics" | python3 -c "
@@ -203,12 +211,14 @@ print(' '.join(re.findall(r\"'([a-z_]+)'\", m.group(1))) if m else '')
     "$([ -n "$task_vocab" ] && echo yes || echo no)"
 
   for s in $epic_vocab; do
+    body="{\"kind\":\"epic\",\"id\":$eid,\"status\":\"$s\"}"
     check "epic status $s accepted" "$s" \
-      "$(jpost api/status "{\"kind\":\"epic\",\"id\":$eid,\"status\":\"$s\"}" \
+      "$(jpost api/status "$body" \
          | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')"
   done
+  body="{\"kind\":\"epic\",\"id\":$eid,\"status\":\"doing\"}"
   check 'bogus epic status rejected' 'invalid status' \
-    "$(jpost api/status "{\"kind\":\"epic\",\"id\":$eid,\"status\":\"doing\"}" \
+    "$(jpost api/status "$body" \
        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error",""))')"
 
   # The vocabulary card is FULLY SPECIFIED, and that is not incidental.
@@ -230,9 +240,10 @@ print(' '.join(re.findall(r\"'([a-z_]+)'\", m.group(1))) if m else '')
   # acceptance tick and the evidence supplied just above it. Every other word
   # ignores it.
   for s in $task_vocab; do
+    body="{\"kind\":\"task\",\"key\":\"$tkey\",\"status\":\"$s\",\"actor\":\"smoke\",\"reason\":\"walking the vocabulary\"}"
     check "task status $s accepted" "$s" \
       "$(jpost api/status \
-          "{\"kind\":\"task\",\"key\":\"$tkey\",\"status\":\"$s\",\"actor\":\"smoke\",\"reason\":\"walking the vocabulary\"}" \
+          "$body" \
          | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')"
   done
 
@@ -242,30 +253,36 @@ print(' '.join(re.findall(r\"'([a-z_]+)'\", m.group(1))) if m else '')
   # delete section below reuses it.
   tid="$(jpost api/tasks "{\"epic_id\":$eid,\"title\":\"thin card\"}" \
          | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')"
+  body="{\"kind\":\"task\",\"id\":$tid,\"status\":\"done\"}"
   check 'ungated close by row id -> 409' 409 \
     "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-        --data "{\"kind\":\"task\",\"id\":$tid,\"status\":\"done\"}" "$BASE/api/status")"
+        --data "$body" "$BASE/api/status")"
+  body="{\"kind\":\"task\",\"id\":$tid,\"status\":\"done\"}"
   check 'the refusal names a remedy' 'yes' \
-    "$(jpost api/status "{\"kind\":\"task\",\"id\":$tid,\"status\":\"done\"}" \
+    "$(jpost api/status "$body" \
        | python3 -c 'import json,sys
 d = json.load(sys.stdin)
 print("yes" if d.get("missing") and all(m.get("hint") for m in d["missing"]) else "no")')"
+  body="{\"kind\":\"task\",\"id\":$tid,\"status\":\"done\",\"mirror\":true}"
   check 'mirror rejected by /api/status' 400 \
     "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-        --data "{\"kind\":\"task\",\"id\":$tid,\"status\":\"done\",\"mirror\":true}" \
+        --data "$body" \
         "$BASE/api/status")"
+  body="{\"kind\":\"task\",\"title\":\"x\",\"mirror\":true}"
   check 'mirror rejected by /api/board/create' 400 \
     "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-        --data "{\"kind\":\"task\",\"title\":\"x\",\"mirror\":true}" \
+        --data "$body" \
         "$BASE/api/board/create")"
 
   echo '--- delete, and the cascade ---'
+  body="{\"kind\":\"task\",\"id\":$tid}"
   check 'delete a task' 'True' \
-    "$(jpost api/delete "{\"kind\":\"task\",\"id\":$tid}" \
+    "$(jpost api/delete "$body" \
        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok",""))')"
+  body="{\"kind\":\"task\",\"id\":$tid}"
   check 'deleting it twice -> 404' 404 \
     "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-        --data "{\"kind\":\"task\",\"id\":$tid}" "$BASE/api/delete")"
+        --data "$body" "$BASE/api/delete")"
   check 'journal cannot be deleted' 400 \
     "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
         --data '{"kind":"journal","id":1}' "$BASE/api/delete")"
@@ -276,8 +293,9 @@ print("yes" if d.get("missing") and all(m.get("hint") for m in d["missing"]) els
   # exist because that surface is gated now and a bare-title card cannot walk the
   # status vocabulary. So the epic holds the vocab card AND the thin card, and a
   # cascade that reported 1 would mean it had missed one of them.
+  body="{\"kind\":\"epic\",\"id\":$eid}"
   check 'deleting the epic cascades its tasks' 2 \
-    "$(jpost api/delete "{\"kind\":\"epic\",\"id\":$eid}" \
+    "$(jpost api/delete "$body" \
        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("cascaded_tasks",""))')"
   check 'the epic is gone' 0 \
     "$(curl -s "$BASE/api/epics" | python3 -c "
@@ -289,8 +307,10 @@ fi
 # grok finding 1: the store allows an 8192-byte journal body, so the request cap
 # must too. The old check used a 13-byte body and so never exercised this.
 long_body="$(python3 -c 'print("x" * 4000)')"
-check 'long journal body stores (not 413)' 'longbody'   "$(jpost api/journal "{\"kind\":\"note\",\"subject\":\"longbody\",\"body\":\"$long_body\"}"      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("subject",""))')"
-check 'oversize journal body still 413' 413   "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json'       --data "{\"kind\":\"note\",\"subject\":\"toobig\",\"body\":\"$(python3 -c 'print("x" * 12000)')\"}"       "$BASE/api/journal")"
+body="{\"kind\":\"note\",\"subject\":\"longbody\",\"body\":\"$long_body\"}"
+check 'long journal body stores (not 413)' 'longbody'   "$(jpost api/journal "$body"      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("subject",""))')"
+body="{\"kind\":\"note\",\"subject\":\"toobig\",\"body\":\"$(python3 -c 'print("x" * 12000)')\"}"
+check 'oversize journal body still 413' 413   "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json'       --data "$body"       "$BASE/api/journal")"
 
 # grok's note: smoke did not cover the MQTT endpoints, so a dropped guard there
 # would still have printed 48/48. test_mqtt.py covers them in depth; these two keep
@@ -308,8 +328,9 @@ did="$(jpost api/devices '{"name":"smoke-plc","kind":"plc","address":"10.0.0.5",
 check 'device round-trip' true "$([ -n "$did" ] && echo true || echo false)"
 # Clean up after ourselves. Earlier runs had no delete, so each one left a row
 # behind and the IIOT view filled with duplicate smoke-plc entries.
+body="{\"kind\":\"device\",\"id\":$did}"
 check 'device deleted' 'True' \
-  "$(jpost api/delete "{\"kind\":\"device\",\"id\":$did}" \
+  "$(jpost api/delete "$body" \
      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok",""))')"
 
 

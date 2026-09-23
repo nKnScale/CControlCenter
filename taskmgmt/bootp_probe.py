@@ -24,6 +24,7 @@ on stderr.
 import argparse
 import datetime as dt
 import json
+import os
 import socket
 import struct
 import sys
@@ -126,8 +127,25 @@ def bind(port, iface):
         except (AttributeError, OSError) as err:
             # Not fatal: without SO_BINDTODEVICE we simply listen on every
             # interface. Say so rather than silently widening the scope.
+            #
+            # Caveat: macOS defines SO_BINDTODEVICE (a different value) and
+            # accepts setsockopt for it without implementing the behaviour, so
+            # this branch does NOT fire there and --iface binds nothing. The
+            # socket still listens on every interface, which is the documented
+            # fallback, so treat --iface as Linux-only.
             print(f"note: could not bind to {iface} ({err}); listening on all "
                   f"interfaces", file=sys.stderr)
+    # Refuse on the uid, not on the kernel's answer. Relying on PermissionError
+    # is not portable: Linux denies a non-root bind of UDP 67, but macOS/BSD
+    # ALLOWS it on the wildcard address - only an explicit 127.0.0.1 is refused.
+    # So on macOS the bind quietly succeeded and this script ran unprivileged
+    # while still claiming a privileged port was needed. An explicit check makes
+    # the refusal identical on every platform, and keeps the promise the message
+    # makes. Still no escalation: it reports and exits.
+    if os.getuid() != 0:
+        sock.close()
+        sys.exit(f"cannot bind UDP {port}: this needs root (or CAP_NET_BIND_SERVICE). "
+                 f"Re-run with sudo. This script will not try to escalate.")
     try:
         sock.bind(("", port))
     except PermissionError:

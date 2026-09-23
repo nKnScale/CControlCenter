@@ -43,6 +43,33 @@ redraws and key handling; a Linux binary in a Linux pty does not. The tradeoff
 is that the WSL `codex` has its own `~/.codex` — separate login, separate
 `config.toml`, separate MCP servers from the Windows install.
 
+### It also runs on macOS
+
+WSL is where this was built and is still the reference platform, but nothing here
+is WSL-specific by design, so the harness and the dashboard run on macOS too.
+Every command in this README carries over unchanged, `bash <(tr -d '\r' < …)`
+idiom included — macOS ships bash 3.2 and nothing here needs bash 4.
+
+The only prerequisite is tmux:
+
+```
+brew install tmux        # the one thing macOS does not ship
+./install.sh
+```
+
+No GNU coreutils needed. Where a GNU-only tool or flag was load-bearing
+(`tac`, `timeout`, `flock`, `setsid`, `stat -c`, `date -Is`, `grep -oP`, `wc -l`'s
+unpadded output, `/proc`) the code now detects the capability and falls back,
+always trying the GNU form first so a Linux run takes exactly the branch it
+always took. There are no `uname` checks.
+
+Two things are WSL-only and say so when run elsewhere:
+`link-windows-state.sh` (it shares state with a *Windows* install, and exits
+early without one) and `--cwd 'C:\...'` drive-letter translation, which needs
+`wslpath`. `--iface` on `bootp_probe.py` is Linux-only too: macOS accepts
+`SO_BINDTODEVICE` without implementing it, so the probe listens on every
+interface there.
+
 ## Orchestration: who may say the work is finished
 
 The hard part of running agents is not starting them. It is knowing when to believe
@@ -441,7 +468,7 @@ eight new files of one run would have been reviewed blind.
 | `verify_model_switch.sh` | Proves the model chosen in Settings reaches a newly spawned agent. |
 | `purge_test_rows.py` | Removes rows the suites leave in `cc.db`. Exact-name matches only; never touches the journal. |
 
-Run both suites (from the repo root, inside WSL):
+Run both suites (from the repo root, inside WSL — or on macOS):
 
 ```
 bash <(tr -d '\r' < dashboard/restart.sh)

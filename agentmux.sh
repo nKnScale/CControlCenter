@@ -61,7 +61,42 @@ strip_ansi() {
 }
 
 # Drop leading and trailing blank lines, leave the middle alone.
-trim_edges() { sed -e '/./,$!d' | tac | sed -e '/./,$!d' | tac; }
+# Reverse stdin by lines. GNU `tac` does not exist on macOS/BSD, where `tail -r`
+# is the equivalent; prefer tac when present so Linux behaviour is untouched.
+if command -v tac >/dev/null 2>&1; then rev_lines() { tac; }
+else                                  rev_lines() { tail -r; }; fi
+
+trim_edges() { sed -e '/./,$!d' | rev_lines | sed -e '/./,$!d' | rev_lines; }
+
+# Octal permission bits. GNU and BSD stat spell this differently, and the answer
+# is load-bearing: the caller refuses to load $ROOT/env unless it reads 600 or
+# 400, so a silently failing stat would block every spawn on this machine.
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+
+# ISO-8601 local timestamp. GNU's shorthand -Is is not accepted by BSD date, but
+# the long form -Iseconds is accepted by both and emits the identical string, so
+# there is no branch here. `list` compares these stamps as strings, so the exact
+# byte format matters.
+iso_now() { date -Iseconds; }
+
+# GNU coreutils `timeout` does not exist on macOS. Provide the subset used here -
+# `run_timeout SECONDS cmd...`, exiting 124 on expiry like the real one. No
+# --kill-after and no --signal; stdin is inherited. Every call site uses the plain
+# `timeout N cmd` form, so that is enough.
+if command -v timeout >/dev/null 2>&1; then
+  run_timeout() { timeout "$@"; }
+else
+  run_timeout() {
+    local secs="$1"; shift
+    "$@" & local pid=$!
+    ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) 2>/dev/null & local watch=$!
+    local rc=0
+    wait "$pid" 2>/dev/null || rc=$?
+    kill "$watch" 2>/dev/null; wait "$watch" 2>/dev/null
+    [ "$rc" -gt 128 ] && rc=124
+    return "$rc"
+  }
+fi
 
 # C:\foo or C:/foo -> /mnt/c/foo ; anything else passes through unchanged.
 to_wsl_path() {
@@ -74,7 +109,19 @@ to_wsl_path() {
 # Newest nvm-managed node bin dir, so panes get the Linux toolchain ahead of
 # the Windows shims that WSL interop appends to PATH.
 node_bin() {
-  ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1
+  local d
+  d="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)"
+  [ -n "$d" ] && { printf '%s' "$d"; return 0; }
+  # No nvm on this machine (e.g. a Homebrew node on macOS). Same intent - give
+  # the pane a real node toolchain - without assuming nvm's directory layout.
+  d="$(command -v node 2>/dev/null)" || return 0
+  [ -n "$d" ] || return 0
+  # Never a Windows path. Under WSL, interop appends the Windows npm shims to
+  # PATH, and prepending one of those to the pane would cause the very failure
+  # this function exists to prevent - a shim that cannot execute under Linux.
+  # No match means no usable Linux node, which is what the caller expects.
+  case "$d" in /mnt/*) return 0 ;; esac
+  printf '%s' "$(dirname "$d")"
 }
 
 # The claude config dir this machine ACTUALLY uses.
@@ -201,7 +248,7 @@ task_cli() {
 # outage must not stop an agent spawning or a pane being killed.
 task_try() {
   local cli; cli="$(task_cli)" || return 0
-  timeout 45 python3 "$cli" "$@" 2>&1 | sed 's/^/  jira: /' || true
+  run_timeout 45 python3 "$cli" "$@" 2>&1 | sed 's/^/  jira: /' || true
 }
 
 # tmux pane target for an agent. "=name" matches a session but is NOT a valid
@@ -543,7 +590,7 @@ cmd_spawn() (
         summary="${task#new:}"
         [ -n "$summary" ] || die '--task new: needs a summary, e.g. --task new:"Fix the thing"'
         task_cli >/dev/null || die "--task new: needs taskmgmt/task.py plus ~/.agentmux/atlassian.json"
-        created="$(timeout 60 python3 "$(task_cli)" create --summary "$summary"                     --label agentmux --label "agent-$name" 2>/dev/null | tail -1)"
+        created="$(run_timeout 60 python3 "$(task_cli)" create --summary "$summary"                     --label agentmux --label "agent-$name" 2>/dev/null | tail -1)"
         printf '%s' "$created" | grep -Eq '^[A-Z][A-Z0-9_]+-[0-9]+$'           || die "could not create a Jira issue (got '${created:-<empty>}')"
         task="$created"
         printf "created Jira issue %s for agent '%s'
@@ -593,7 +640,12 @@ cmd_spawn() (
   nb="$(node_bin)"
   # ~/.grok/bin holds xAI's grok CLI. Its installer adds that to .bashrc, which a
   # tmux pane never sources (non-login, non-interactive), so add it explicitly.
-  env_prefix="export PATH='${nb}:'\$HOME'/.grok/bin:'\$PATH;"
+  # An empty $nb must not leave a leading ':' here: an empty PATH element means
+  # the current directory, which would put the agent's own cwd ahead of every
+  # real bin dir - and these panes run with the permission bypass.
+  local nbp=""
+  [ -n "$nb" ] && nbp="'${nb}':"
+  env_prefix="export PATH=${nbp}\$HOME'/.grok/bin':\$PATH;"
   # An issue key is not a secret, so exporting it directly is fine. Contrast
   # $ROOT/env below, which is SOURCED precisely so credentials never reach the
   # tmux command line or `ps`. The key is validated in the arg loop above.
@@ -610,7 +662,7 @@ cmd_spawn() (
   # `#{pane_start_command}`, or in this script's own logs. Panes are non-login
   # shells, so ~/.bashrc and ~/.profile are not read - this is the hook for them.
   if [ -f "$ROOT/env" ]; then
-    case "$(stat -c '%a' "$ROOT/env" 2>/dev/null)" in
+    case "$(file_mode "$ROOT/env")" in
       600|400) ;;
       *) printf "agentmux: %s/env is not mode 0600 - refusing to load it.\n         chmod 600 '%s/env'\n" "$ROOT" "$ROOT" >&2; return 1 ;;
     esac
@@ -731,7 +783,7 @@ except Exception:
   printf '%s\n' "$cli" > "$RUNDIR/$name.cli"
   printf '%s\n' "$cwd" > "$RUNDIR/$name.cwd"
   printf '%s\n' "$launch" > "$RUNDIR/$name.launch"
-  date -Is > "$RUNDIR/$name.started"
+  iso_now > "$RUNDIR/$name.started"
   if ! { printf '%s\n' "$agentdef" > "$RUNDIR/$name.agentdef" &&
          printf '%s\n' "$posture" > "$RUNDIR/$name.posture" &&
          printf '%s\n' "$team" > "$RUNDIR/$name.team" &&
@@ -2096,9 +2148,14 @@ cmd_kill() {
 }
 
 # All names that have sidecars under run/, live or not.
+# NOTE the -E. The alternation here was written as a BRE with GNU's \| extension,
+# which BSD sed does not implement: it matched nothing on macOS, so this returned
+# an empty list and `list`, `stale_count` and `reap` all silently believed there
+# were no sidecars at all - reap swept nothing while reporting success. -E is
+# supported by both GNU and BSD sed, so one expression serves each.
 sidecar_names() {
   ls "$RUNDIR" 2>/dev/null \
-    | sed -n 's/\.\(cli\|cwd\|perms\|task\|auth\|pane\|launch\|started\|reported\)$//p' \
+    | sed -nE 's/\.(cli|cwd|perms|task|auth|pane|launch|started|reported)$//p' \
     | sort -u
 }
 
@@ -2328,7 +2385,7 @@ cmd_reap() {
     [ -n "$name" ] || continue
     if have "$name"; then continue; fi
     found=$((found + 1))
-    local files; files="$(ls "$RUNDIR/$name".* 2>/dev/null | wc -l)"
+    local files; files="$(ls "$RUNDIR/$name".* 2>/dev/null | wc -l | tr -d '[:space:]')"
     if [ "$dry" = 1 ]; then
       printf 'would reap %-14s (%s file(s))\n' "$name" "$files"
       continue

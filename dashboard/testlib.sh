@@ -64,6 +64,35 @@ count_msgs() {
   printf '%s' "${n:-0}"
 }
 
+# ── portability ──────────────────────────────────────────────────────────────
+#
+# Detected by capability, never by OS name, and always trying the GNU form first
+# so a Linux/WSL run takes exactly the branch it took before these existed.
+
+# Line count with no surrounding whitespace. BSD `wc -l` LEFT-PADS its output
+# ("       3") where GNU prints "3", and `check` above compares with string `=`,
+# so an unstripped count silently fails every assertion on macOS. The strip is a
+# no-op on GNU, so both platforms produce the same bytes.
+count_lines() { wc -l | tr -d '[:space:]'; }
+
+# GNU coreutils `timeout` does not exist on macOS. Provide the subset the suites
+# use - `run_timeout SECONDS cmd...`, exiting 124 on expiry like the real one.
+# No --kill-after and no --signal; stdin is inherited.
+if command -v timeout >/dev/null 2>&1; then
+  run_timeout() { timeout "$@"; }
+else
+  run_timeout() {
+    local secs="$1"; shift
+    "$@" & local pid=$!
+    ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) 2>/dev/null & local watch=$!
+    local rc=0
+    wait "$pid" 2>/dev/null || rc=$?
+    kill "$watch" 2>/dev/null; wait "$watch" 2>/dev/null
+    [ "$rc" -gt 128 ] && rc=124
+    return "$rc"
+  }
+fi
+
 finish() {
   echo
   echo "passed $pass, failed $fail"
@@ -88,7 +117,7 @@ assert_one_winner() {
   wait
   local count files
   count=$(count_msgs "$winners")
-  files=$(ls $glob 2>/dev/null | wc -l)
+  files=$(ls $glob 2>/dev/null | count_lines)
   rm -f "$winners"
   if [ "$count" = "1" ] && [ "$files" = "1" ]; then
     ok "$label ($n concurrent, 1 winner, 1 artifact)"

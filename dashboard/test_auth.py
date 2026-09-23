@@ -96,16 +96,19 @@ env["CODEX_HOME"] = str(sandbox / ".codex")
 env["AGENTMUX_REPO"] = str(REPO)
 env["AGENTMUX_HOME"] = str(sandbox / ".agentmux")
 
-SETSID = shutil.which("setsid")
-
-
 def setup_auth(args, answers="", timeout=180):
-    """Run setup_auth.py detached from the terminal so getpass reads stdin."""
+    """Run setup_auth.py detached from the terminal so getpass reads stdin.
+
+    start_new_session=True makes the child call os.setsid() itself, which is what
+    the external `setsid` binary did. Doing it in-process drops a dependency that
+    only exists on Linux - setsid is util-linux, absent on macOS - so the detach
+    now happens on every POSIX platform rather than degrading to a warning that
+    getpass may block.
+    """
     argv = [sys.executable, "taskmgmt/setup_auth.py", *args]
-    if SETSID:
-        argv = [SETSID, "-w", *argv]
     return subprocess.run(argv, cwd=REPO, env=env, input=answers,
-                          capture_output=True, text=True, timeout=timeout)
+                          capture_output=True, text=True, timeout=timeout,
+                          start_new_session=True)
 
 
 def split_resolution(stdout):
@@ -130,8 +133,6 @@ def resolve(method_id, cli):
 # ORDER MATTERS HERE. The "nothing configured yet" refusals have to run BEFORE the
 # providers are filled in, because configuring one is what makes its methods resolve.
 print(f"--- nothing configured: a method is refused, and says what is missing ({sandbox}) ---")
-if not SETSID:
-    print("        note: setsid not found; getpass may block")
 out = resolve("claude-vertex", "claude")
 check("unconfigured PROVIDER blocks its method", True,
       out.returncode != 0 and "vertex.gcp_project" in (out.stdout + out.stderr))

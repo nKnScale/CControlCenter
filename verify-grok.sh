@@ -12,7 +12,7 @@
 
 set -uo pipefail
 ENVFILE="$HOME/.agentmux/env"
-MODEL="$(grep -oP '(?<=^model = ")[^"]+' "$HOME/.codex/grok.config.toml" 2>/dev/null)"
+MODEL="$(sed -n 's/^model = "\([^"]*\)".*/\1/p' "$HOME/.codex/grok.config.toml" 2>/dev/null)"
 : "${MODEL:=grok-4.6}"
 pass() { printf '  PASS  %s\n' "$*"; }
 fail() { printf '  FAIL  %s\n' "$*"; FAILED=1; }
@@ -23,7 +23,7 @@ if [ ! -f "$ENVFILE" ]; then
   fail "$ENVFILE does not exist - key not set yet"
   exit 1
 fi
-mode="$(stat -c '%a' "$ENVFILE")"
+mode="$(stat -c '%a' "$ENVFILE" 2>/dev/null || stat -f '%Lp' "$ENVFILE" 2>/dev/null)"
 case "$mode" in
   600|400) pass "mode $mode" ;;
   *) fail "mode $mode - must be 600. The harness will refuse to load it. Run: chmod 600 '$ENVFILE'" ;;
@@ -40,7 +40,13 @@ fi
 pass "XAI_API_KEY set (${#XAI_API_KEY} chars, starts '${XAI_API_KEY:0:4}...')"
 
 echo "3. codex config"
-export PATH="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1):$PATH"
+NODE_BIN="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)"
+if [ -z "$NODE_BIN" ]; then
+  node_path="$(command -v node 2>/dev/null || true)"
+  case "$node_path" in ''|/mnt/*) node_path="" ;; esac
+  [ -n "$node_path" ] && NODE_BIN="$(dirname "$node_path")"
+fi
+[ -n "$NODE_BIN" ] && export PATH="$NODE_BIN:$PATH"
 export COLUMNS=200 LINES=50
 if codex doctor 2>&1 | grep -q '✓ config'; then pass "config loads"; else fail "codex config does not load"; fi
 grep -q 'model_providers.xai' "$HOME/.codex/config.toml" && pass "xai provider block present" || fail "no [model_providers.xai]"

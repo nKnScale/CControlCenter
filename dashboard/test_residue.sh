@@ -79,16 +79,20 @@ try:
         put(fixture / 'bin/flock', '#!/bin/sh\nexit 0\n', True)
         put(fixture / 'bin/tmux', '#!/bin/sh\ncase "$*" in *list-sessions*) echo fixture-agent;; esac\n', True)
         put(fixture / 'dashboard/restart.sh', '''python3 - "$@" <<'RESTART'
-import json, os, pathlib, sys
+import json, os, pathlib, subprocess, sys
 root = pathlib.Path(os.environ['FIXTURE'])
 log = root / 'restarts'
 rows = log.read_text().splitlines() if log.exists() else []
 ready = root / 'ready'
 writer_running = False
 if ready.exists():
-    state = pathlib.Path('/proc') / ready.read_text() / 'stat'
+    # /proc is Linux-only; on macOS this silently left writer_running False and
+    # quietly weakened the assertion below. `ps -o stat=` gives the same state
+    # letters on both, and an empty result means the pid is gone.
+    state = subprocess.run(['ps', '-o', 'stat=', '-p', ready.read_text().strip()],
+                           capture_output=True, text=True).stdout.strip()
     try:
-        writer_running = state.read_text().split(') ', 1)[1].split()[0] != 'Z'
+        writer_running = bool(state) and not state.startswith('Z')
     except FileNotFoundError:
         pass
 with log.open('a') as handle:
@@ -155,7 +159,7 @@ print('passed 1, failed 0')
     put(fixture / 'dashboard/server.py', '# never imported\n')
     put(fixture / 'bin/pgrep', '#!/bin/sh\nexit 1\n', True)
     put(fixture / 'bin/sleep', '#!/bin/sh\nexit 0\n', True)
-    put(fixture / 'bin/python3', '#!' + sys.executable + "\nimport os, pathlib, sys, time\nif any('suite_server.py' in a for a in sys.argv):\n raise SystemExit(0)\npathlib.Path(os.environ['SERVER_PID_FILE']).write_text(str(os.getpid()))\ntime.sleep(30)\n", True)
+    put(fixture / 'bin/python3', '#!' + sys.executable + "\nimport os, pathlib, sys, time\nif len(sys.argv) > 1 and sys.argv[1] == '-c':\n    os.execv(sys.executable, [sys.executable] + sys.argv[1:])\nif any('suite_server.py' in a for a in sys.argv):\n raise SystemExit(0)\npathlib.Path(os.environ['SERVER_PID_FILE']).write_text(str(os.getpid()))\ntime.sleep(30)\n", True)
     put(fixture / 'bin/curl', '#!' + sys.executable + "\nimport os, pathlib, time\np=pathlib.Path(os.environ['SERVER_PID_FILE'])\nfor _ in range(100):\n if p.exists(): break\n time.sleep(.01)\nraise SystemExit(0 if p.exists() else 1)\n", True)
     marker = fixture / 'server-pid'
     env = dict(os.environ, SERVER_PID_FILE=str(marker), AGENTMUX_HOME=str(fixture / 'home'),
@@ -171,8 +175,13 @@ print('passed 1, failed 0')
         except ProcessLookupError:
             pass
         time.sleep(.05)
-        state = Path('/proc') / str(pid) / 'stat'
-        alive = state.exists() and state.read_text().split(') ', 1)[1].split()[0] != 'Z'
+        # /proc is Linux-only. `ps -o stat=` reports the same state letters on
+        # Linux and BSD, and a reaped-but-unwaited child is 'Z' on both, so one
+        # expression serves each. kill(pid, 0) would NOT do: a zombie still
+        # accepts signal 0, which is precisely the case this must reject.
+        state = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
+                               capture_output=True, text=True).stdout.strip()
+        alive = bool(state) and not state.startswith('Z')
         check('restored server outlives the launcher process group', proc.returncode == 0 and detached and alive)
     finally:
         try:

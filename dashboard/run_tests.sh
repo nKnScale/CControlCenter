@@ -16,17 +16,48 @@ set -u
 # HTTP writes occur in the SERVER process: a client-side home cannot isolate them.
 # Lease port 8787 for this suite, swap to an empty home, and restore without ever
 # passing --fresh-db. The EXIT handler is installed before the first restart.
-exec 200>"${TMPDIR:-/tmp}/agentmux-dashboard-tests-${UID}.lock"
-flock -n 200 || {
-  # This used to say "another dashboard suite owns port 8787", which sent two
-  # separate investigations to netstat. The guard is a LOCK, not a port probe, so
-  # say so and name the file - the holder is findable in one command from here.
-  echo "another dashboard suite holds the lock (this is a flock, not a port check)" >&2
-  echo "  lock: ${TMPDIR:-/tmp}/agentmux-dashboard-tests-${UID}.lock" >&2
-  echo "  who:  fuser -v '${TMPDIR:-/tmp}/agentmux-dashboard-tests-${UID}.lock'" >&2
-  echo "  a killed run can leave a detached tmux server or idle watchdog holding it" >&2
-  exit 2
-}
+LOCK="${TMPDIR:-/tmp}/agentmux-dashboard-tests-${UID:-$(id -u)}.lock"
+LOCKDIR=""
+if command -v flock >/dev/null 2>&1; then
+  exec 200>"$LOCK"
+  flock -n 200 || {
+    # This used to say "another dashboard suite owns port 8787", which sent two
+    # separate investigations to netstat. The guard is a LOCK, not a port probe, so
+    # say so and name the file - the holder is findable in one command from here.
+    echo "another dashboard suite holds the lock (this is a flock, not a port check)" >&2
+    echo "  lock: ${TMPDIR:-/tmp}/agentmux-dashboard-tests-${UID:-$(id -u)}.lock" >&2
+    echo "  who:  fuser -v '${TMPDIR:-/tmp}/agentmux-dashboard-tests-${UID:-$(id -u)}.lock'" >&2
+    echo "  a killed run can leave a detached tmux server or idle watchdog holding it" >&2
+    exit 2
+  }
+else
+  # No flock - it is util-linux, so macOS has none (and Homebrew's util-linux is
+  # keg-only, so installing it would not even put flock on PATH). `mkdir` is
+  # atomic on every POSIX filesystem, so the directory IS the lock.
+  #
+  # This branch is load-bearing rather than cosmetic. With flock merely absent,
+  # `flock -n 200` failed as 'command not found', which took the || branch, so
+  # the suite announced 'another dashboard suite owns port 8787' and exited 2
+  # having run NOTHING - a real refusal, but blaming a competing run that does
+  # not exist, and unfixable by the operator since nothing held the port. So the
+  # fallback has to actually acquire a lock rather than just report differently.
+  #
+  # The owner pid is recorded so a crashed run is reclaimed instead of blocking
+  # every later run. Release happens inside cleanup(), NOT in a second EXIT trap:
+  # `trap cleanup EXIT` below would silently replace one and leak the directory.
+  LOCKDIR="$LOCK.d"
+  if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    owner="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+      echo "another dashboard suite holds the lock (owner pid $owner)" >&2
+      echo "  lock: $LOCKDIR" >&2; exit 2
+    fi
+    echo "note: clearing a stale suite lock (owner ${owner:-unknown} is gone)" >&2
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR" 2>/dev/null || { echo 'cannot acquire the suite lock' >&2; exit 2; }
+  fi
+  printf '%s\n' "$$" > "$LOCKDIR/pid"
+fi
 OPERATOR_ROOT="$(python3 dashboard/suite_server.py --fallback "${AGENTMUX_HOME:-$HOME/.agentmux}")" || exit 2
 TEST_ROOT="$(mktemp -d)" || exit 2
 SPAWNED=""
@@ -71,6 +102,8 @@ cleanup() {
   else
     rm -rf "$TEST_ROOT"
   fi
+  # Empty when flock held the lock, where the kernel drops it with fd 200.
+  [ -n "$LOCKDIR" ] && rm -rf "$LOCKDIR"
   exit "$status"
 }
 trap cleanup EXIT
@@ -138,6 +171,26 @@ while IFS=$'\t' read -r name pane; do
 done < <(tmux -L agentmux list-panes -a -F $'#{session_name}\t#{pane_id}' 2>/dev/null)
 
 total_fail=0
+
+# A whole-suite hang guard. GNU `timeout` does not exist on macOS, and run()
+# below EXECS its argv, so a shell function cannot be substituted - the first
+# word has to be a real program. Use the real timeout when it is there, so
+# nothing changes on Linux, and otherwise an equivalent python3 watchdog: same
+# argument order, same 124 on expiry, and python3 is guaranteed present because
+# the suites themselves are python. Dropping the guard instead was not an
+# option - a hang guard that silently disappears on one platform is exactly the
+# kind of always-green guard this suite exists to prevent.
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT=(timeout)
+else
+  TIMEOUT=(python3 -c 'import subprocess, sys
+child = subprocess.Popen(sys.argv[2:])
+try:
+    sys.exit(child.wait(timeout=float(sys.argv[1])))
+except subprocess.TimeoutExpired:
+    child.kill(); child.wait(); sys.exit(124)
+')
+fi
 
 run() {
   local label="$1"; shift
@@ -295,7 +348,7 @@ run test_tickets.py python3 dashboard/test_tickets.py
 run test_chatter.py python3 dashboard/test_chatter.py
 run test_courier.py python3 dashboard/test_courier.py
 run test_gateway.py python3 dashboard/test_gateway.py
-run test_auth.py  timeout 400 python3 dashboard/test_auth.py
+run test_auth.py  "${TIMEOUT[@]}" 400 python3 dashboard/test_auth.py
 
 # test_gateway.py needs no key and makes no network call, so it runs whether or not the
 # Bedrock path is parked. Its last section compares the reconstructed

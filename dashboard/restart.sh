@@ -57,7 +57,20 @@ if [ "${1:-}" = '--fresh-db' ]; then
 fi
 
 # The restored dashboard must outlive the suite process group.
-nohup setsid python3 dashboard/server.py > /tmp/ccc-server.log 2>&1 &
+# setsid is util-linux and does not exist on macOS (and Homebrew's util-linux is
+# keg-only, so installing it would not put setsid on PATH). Fall back to doing
+# setsid's job directly: fork, let the parent exit, and have the child - which is
+# not a process-group leader, so setsid(2) cannot fail with EPERM - start its own
+# session before exec'ing the server.
+if command -v setsid >/dev/null 2>&1; then
+  nohup setsid python3 dashboard/server.py > /tmp/ccc-server.log 2>&1 &
+else
+  nohup python3 -c 'import os, sys
+if os.fork() == 0:
+    os.setsid()
+    os.execvp(sys.argv[1], sys.argv[1:])
+' python3 dashboard/server.py > /tmp/ccc-server.log 2>&1 &
+fi
 sleep 3
 if ! curl -s -o /dev/null "http://127.0.0.1:8787/"; then
   echo 'FAILED to come up:'
