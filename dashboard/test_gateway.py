@@ -294,9 +294,17 @@ if SOURCE.is_file() and PRESERVED.is_file():
         loader = importlib.machinery.SourcelessFileLoader("gw_original", str(PRESERVED))
         spec = importlib.util.spec_from_file_location("gw_original", str(PRESERVED),
                                                       loader=loader)
-        original = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(original)
+        # Bind only AFTER exec_module returns. module_from_spec hands back a
+        # module object that is still EMPTY, so assigning `original` here and
+        # letting exec_module raise left a non-None husk behind - `differ`'s
+        # `if original is None` guard then passed, every attribute lookup on the
+        # husk raised AttributeError, and all nine families reported every case
+        # divergent while this very branch printed "skipped".
+        candidate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(candidate)
+        original = candidate
     except Exception as err:                       # a newer CPython refuses the magic
+        original = None
         print(f"        skipped: cannot load the 2026-09-19 bytecode ({err})")
         print("        the checks above still stand as a specification.")
 else:

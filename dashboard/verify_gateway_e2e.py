@@ -39,7 +39,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-REPO = "/mnt/c/Dev/agentmux"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ["AWS_BEARER_TOKEN_BEDROCK"] = "fake-key-for-local-test"
 
 MODE = {"kind": "once"}          # flipped per scenario by the fake upstream
@@ -104,7 +104,16 @@ upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeBedrock)
 threading.Thread(target=upstream.serve_forever, daemon=True).start()
 UPSTREAM_URL = f"http://127.0.0.1:{upstream.server_address[1]}/chat"
 
-old = load("gw_original", f"{REPO}/taskmgmt/recovered/bedrock_gateway.cpython-312.pyc.bin", True)
+try:
+    old = load("gw_original", f"{REPO}/taskmgmt/recovered/bedrock_gateway.cpython-312.pyc.bin", True)
+except Exception as error:                     # a newer CPython refuses the magic
+    raise SystemExit(
+        f"cannot load the 2026-09-19 bytecode baseline ({error}).\n"
+        f"It is CPython 3.12 bytecode and this is "
+        f"{sys.version_info.major}.{sys.version_info.minor}; see "
+        f"taskmgmt/recovered/README.md. This script is a differential test, so it\n"
+        f"has verified NOTHING - run it under CPython 3.12, or use\n"
+        f"dashboard/test_gateway.py, whose own checks stand as a specification.")
 new = load("gw_new", f"{REPO}/taskmgmt/bedrock_gateway.py")
 
 servers = {}
