@@ -57,6 +57,25 @@ modal 'claude bypass consent (2026-09-22)' '  By proceeding, you accept all resp
     Yes, I accept
   Enter to confirm · Esc to cancel'
 
+echo '--- the two that slipped through when gemini was added (2026-09-23) ---'
+# Both are literal captures of the last eight non-blank lines, which is the slice
+# modal_prompt actually inspects. Neither contains a question or a selector
+# marker - the dialog's own controls are above the window - which is exactly why
+# `send` typed into them and advanced the dialog.
+modal 'claude theme picker' '   7. Light mode (ANSI colors only)
+  1  function greet() {
+  2 -  console.log("Hello, World!");
+  2 +  console.log("Hello, Claude!");
+  3  }
+  Syntax theme: Monokai Extended (ctrl+t to disable)'
+modal 'gemini terms screen' '│   (Use Enter to select)
+│   Terms of Services and Privacy Notice for Gemini CLI
+│   https://geminicli.com/docs/resources/tos-privacy/'
+modal 'gemini radio confirm'    '│  Do you want to continue?
+│  ● 1. Yes
+│    2. No
+│  Enter to select · ↑/↓ to navigate · Esc to cancel'
+
 echo '--- claude startup dialogs ---'
 modal 'folder trust'            '  Do you trust the files in this folder?
   ❯ No, exit
@@ -77,6 +96,15 @@ modal 'numbered selection'      '  ❯ 1. Claude account with subscription
     2. Anthropic Console account'
 modal 'y/n inline'              '  Overwrite the file? [y/n]'
 modal 'parenthesised y/n'       '  Continue (y/N)'
+
+# The new alternatives are TUI chrome, not prose. Prove they do not fire on an
+# agent that merely writes about the same subjects.
+normal 'prose about a theme'    '  I updated the syntax theme handling in style.css
+  and the chip colours now follow the token set.'
+normal 'prose about terms'      '  The terms of service link in the footer is stale;
+  I replaced it with the current URL.'
+normal 'prose about a selector'  '  The picker needs Enter to choose an entry, so the
+  courier has to use key rather than send.'
 modal 'press any key'           '  Press any key to continue'
 modal 'select an option'        '  Select an option to continue'
 modal 'login menu'              '  ❯ Sign in with your account'

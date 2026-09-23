@@ -98,6 +98,17 @@ else
   }
 fi
 
+# How to attach from THIS machine. Under WSL the operator is usually sitting at a
+# Windows terminal, so the hint has to cross back over; anywhere else that prefix
+# is just a command that does not exist.
+attach_hint() {
+  if [ -d /mnt/c ] && command -v wslpath >/dev/null 2>&1; then
+    printf 'wsl -d Ubuntu -- tmux -L %s attach -t %s' "$SOCKET" "$1"
+  else
+    printf 'tmux -L %s attach -t %s' "$SOCKET" "$1"
+  fi
+}
+
 # C:\foo or C:/foo -> /mnt/c/foo ; anything else passes through unchanged.
 to_wsl_path() {
   case "$1" in
@@ -163,6 +174,32 @@ claude_config_gc() {
     [[ "$agent" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || continue
     have "$agent" || rm -rf -- "$d"
   done
+}
+
+# The codex bypass profile, ensured rather than assumed.
+#
+# codex 0.155 resolves `--profile yolo` to $CODEX_HOME/yolo.config.toml. When that
+# file is ABSENT codex does not error and does not warn - it silently runs with the
+# default sandbox while agentmux goes on printing UNRESTRICTED. Measured here:
+#
+#   with yolo.config.toml     approval: never   sandbox: danger-full-access
+#   profile missing entirely  approval: never   sandbox: workspace-write
+#
+# Nothing in this repo ever created the file, so on any machine where it was not
+# made by hand every codex agent was confined to the workspace while the harness
+# claimed otherwise. Same shape as claude_config_dir() below: build the posture
+# on demand, and refuse to spawn rather than misreport if it cannot be built.
+#
+# Additive only - a separate file named for the profile. config.toml is never
+# touched, and codex 0.155 in fact REFUSES --profile when a legacy [profiles.*]
+# table is present in config.toml, so writing there would be actively wrong.
+codex_yolo_profile() {
+  local home="${CODEX_HOME:-$HOME/.codex}" file
+  file="$home/yolo.config.toml"
+  [ -f "$file" ] && { printf '%s' "$file"; return 0; }
+  mkdir -p "$home" 2>/dev/null || return 1
+  printf 'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n' > "$file" 2>/dev/null || return 1
+  printf '%s' "$file"
 }
 
 claude_config_dir() {
@@ -271,7 +308,7 @@ usage() {
   cat <<'USAGE'
 agentmux - drive other agent CLIs in tmux panes
 
-  spawn <name> [--cli codex|claude|grok|shell|<cmd>] [--cwd DIR] [--model M]
+  spawn <name> [--cli codex|claude|grok|gemini|shell|<cmd>] [--cwd DIR] [--model M]
                [--task ABC-123] [--auth METHOD]
                [--agentdef NAME] [--posture read-only|workspace-write|unrestricted]
                [--persona-file PATH] [--tools CSV] [--deny-tools CSV]
@@ -287,6 +324,8 @@ agentmux - drive other agent CLIs in tmux panes
                                List them: python3 taskmgmt/setup_auth.py --list
                                grok = xAI's CLI, authenticated by ACCOUNT LOGIN
                                (`grok login`), no API key required
+                               gemini = Google's CLI, authenticated by GOOGLE
+                               ACCOUNT sign-in, no API key required
   send   <name> [--force] <text...>
                                type text + Enter into the agent. Refuses if the pane
                                is showing a prompt (an update notice, a trust dialog),
@@ -386,10 +425,12 @@ agentmux - drive other agent CLIs in tmux panes
                                automatically every minute while any agent is up
   attach <name>                print the command to watch the agent live
   exec   <text...> [--cwd DIR] [--model M]
-                               headless one-shot "codex exec", no tmux
+                               headless one-shot "codex exec", no tmux. codex
+                               only - the other CLIs are driven through a pane
 
-Spawned codex/claude agents run with the provider's master permission bypass by
-default (unrestricted). Set AGENTMUX_NO_BYPASS=1 to spawn sandboxed instead.
+Spawned codex, claude, grok and gemini agents all run with their provider's
+master permission bypass by default (unrestricted). Set AGENTMUX_NO_BYPASS=1 to
+spawn sandboxed instead.
 
 Env: AGENTMUX_QUIET_MS, AGENTMUX_TIMEOUT_S, AGENTMUX_POLL_MS, AGENTMUX_COLS/ROWS
      AGENTMUX_NO_BYPASS, AGENTMUX_NO_COURIER, AGENTMUX_SETTLE_MS
@@ -624,6 +665,11 @@ cmd_spawn() (
       # Permission modes alone are not a filesystem boundary. Fail closed.
       [ "$posture" = unrestricted ] || die "grok cannot enforce posture '$posture': no verified sandbox profile"
       ;;
+    gemini)
+      # Same rule as grok: gemini's sandbox has not been verified to enforce these
+      # contract levels, so only unrestricted is offered. Fail closed.
+      [ "$posture" = unrestricted ] || die "gemini cannot enforce posture '$posture': no verified sandbox profile"
+      ;;
     *)
       [ "$posture_explicit" = 0 ] && [ -z "$agentdef$tools$deny_tools$persona_file$team$role" ] || die "cannot enforce agent definition flags for CLI '$cli'"
       ;;
@@ -740,6 +786,16 @@ except Exception:
       [ -z "$deny_tools" ] || launch="$launch --disallowedTools '$deny_tools'"
       ;;
     grok) launch="grok --permission-mode bypassPermissions${model:+ -m $quoted_model}" ;;
+    gemini)
+      # Google's CLI. Signs in with a GOOGLE ACCOUNT (~/.gemini/oauth_creds.json
+      # via the CLI's own /auth flow); GEMINI_API_KEY is the non-browser
+      # fallback, so like grok this needs no key by default.
+      #
+      # --skip-trust is paired with --approval-mode yolo deliberately: gemini
+      # otherwise opens on a folder-trust dialog, and a pane sitting on a modal is
+      # one `send` away from actuating it. Under bypass the pane already has full
+      # access, so trusting the workspace changes nothing.
+      launch="gemini --approval-mode yolo --skip-trust${model:+ -m $quoted_model}" ;;
     shell) launch="${SHELL:-/bin/bash}" ;;
     *) launch="$cli" ;;
   esac
@@ -800,7 +856,7 @@ except Exception:
   # Recorded explicitly: for claude the bypass lives in the pane's environment,
   # not the launch line, so the launch line alone cannot tell you the posture.
   case "$cli" in
-    codex|claude|grok) [ "$bypass" = 1 ] && echo UNRESTRICTED || echo sandboxed ;;
+    codex|claude|grok|gemini) [ "$bypass" = 1 ] && echo UNRESTRICTED || echo sandboxed ;;
     *)            echo n/a ;;
   esac > "$RUNDIR/$name.perms"
 
@@ -867,8 +923,8 @@ except Exception:
     printf '  idle:    closes after %sm without pane activity\n' \
       "${AGENTMUX_IDLE_MINUTES:-$IDLE_MINUTES}"
   fi
-  case "$cli" in codex|claude|grok) printf '  posture: %s\n' "$posture" ;; esac
-  printf "watch it:  wsl -d Ubuntu -- tmux -L %s attach -t %s\n" "$SOCKET" "$name"
+  case "$cli" in codex|claude|grok|gemini) printf '  posture: %s\n' "$posture" ;; esac
+  printf "watch it:  %s\n" "$(attach_hint "$name")"
 )
 
 # Does the pane currently show a blocking prompt that is NOT the agent's normal input?
@@ -903,9 +959,24 @@ except Exception:
 # Split in two so the PATTERN can be tested without a tmux server or a real CLI:
 # modal_text takes the text, modal_prompt supplies it from a pane.
 # dashboard/test_modal_guard.sh exercises modal_text against captured samples.
+# Four of the alternatives below were added when gemini was wired in, after two
+# of these screens were measured slipping through and taking the Enter:
+#
+#   claude's THEME PICKER - its selector sits above the eight-line window this
+#     inspects, and the visible tail is only a syntax-highlighting preview, so
+#     there is no marker and no question to match. `syntax theme:` is the only
+#     thing on screen that identifies it.
+#   gemini's TERMS screen - same shape, and its footer says `(Use Enter to
+#     select)` rather than anything resembling a question. Matched on gemini's
+#     full literal heading rather than a bare `terms of service`, which an agent
+#     could plausibly write while working on a legal page.
+#
+# `↑/↓ to navigate` and the ●/○ radio markers come from gemini's selection
+# dialogs generally. All four are strings a TUI draws, not prose an agent would
+# write, which is what keeps the false-positive half of test_modal_guard.sh green.
 modal_text() {
   printf '%s' "$1" | grep -Eqi \
-    'press enter to continue|update now \(runs|\[y/n\]|\(y/n\)|do you (want|trust)|allow this|press any key|select an option|continue\? *$|enter to confirm|esc to cancel|no, (exit|quit)|yes, i (accept|trust)|trust this folder|[❯›▶>][[:space:]]+([0-9]+\.|yes\b|no\b|switch\b|keep\b|continue\b|sign in\b|log ?in\b)'
+    'press enter to continue|update now \(runs|\[y/n\]|\(y/n\)|do you (want|trust)|allow this|press any key|select an option|continue\? *$|enter to confirm|esc to cancel|no, (exit|quit)|yes, i (accept|trust)|trust this folder|use enter to select|↑/↓ to navigate|terms of services and privacy notice|syntax theme:|[❯›▶>●○][[:space:]]+([0-9]+\.|yes\b|no\b|switch\b|keep\b|continue\b|sign in\b|log ?in\b)'
 }
 
 modal_prompt() {
@@ -1217,7 +1288,7 @@ cmd_wait() {
   local cli settle_ms="${AGENTMUX_SETTLE_MS:-600}" use_marker=0
   cli="$(cat "$RUNDIR/$name.cli" 2>/dev/null || echo '')"
   if [ "${AGENTMUX_WAIT_NO_MARKER:-0}" != "1" ]; then
-    case "$cli" in codex|claude|grok) use_marker=1 ;; esac
+    case "$cli" in codex|claude|grok|gemini) use_marker=1 ;; esac
   fi
 
   busy_marker() {
@@ -2441,7 +2512,7 @@ cmd_attach() {
   local name="${1:-}"
   [ -n "$name" ] || die "attach needs a name"
   need "$name"
-  printf 'wsl -d Ubuntu -- tmux -L %s attach -t %s\n' "$SOCKET" "$name"
+  printf '%s\n' "$(attach_hint "$name")"
   echo "(detach with Ctrl-b d)"
 }
 
@@ -2467,7 +2538,10 @@ cmd_exec() {
   export PATH="$(node_bin):$PATH"
   # Same unrestricted default as cmd_spawn; exec retains its legacy yolo profile.
   local bypass=""
-  [ "${AGENTMUX_NO_BYPASS:-0}" != "1" ] && bypass="--profile yolo"
+  if [ "${AGENTMUX_NO_BYPASS:-0}" != "1" ]; then
+    codex_yolo_profile >/dev/null || die "could not write the codex yolo profile"
+    bypass="--profile yolo"
+  fi
   # stdin is redirected from /dev/null: codex exec inherits stdin otherwise, so
   # when called from inside a heredoc it swallows the rest of the caller's
   # script as prompt text and never runs it (audit D32).
