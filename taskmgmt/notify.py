@@ -97,6 +97,40 @@ try {
 """.strip()
 
 
+OSASCRIPT = "/usr/bin/osascript"
+
+# The same rule as TOAST_SCRIPT: the text is read from the environment by
+# `system attribute`, so nothing a reviewer wrote is ever parsed as AppleScript.
+MAC_TOAST_SCRIPT = ('display notification (system attribute "AGENTMUX_TOAST_BODY") '
+                    'with title (system attribute "AGENTMUX_TOAST_TITLE")')
+
+
+def osascript_path():
+    """osascript on macOS, or None. Honours the same AGENTMUX_NO_TOAST opt-out."""
+    if os.environ.get("AGENTMUX_NO_TOAST") == "1":
+        return None
+    return OSASCRIPT if Path(OSASCRIPT).is_file() else None
+
+
+def toast_macos(osascript, subject, body, urgency="info"):
+    """Notification Center, the macOS counterpart of the WinRT toast below."""
+    tag = {"error": "Error", "warn": "Warning"}.get(urgency, "Information")
+    env = dict(os.environ)
+    env["AGENTMUX_TOAST_TITLE"] = one_line(f"agentmux {tag}: {subject}", SUBJECT_MAX)
+    env["AGENTMUX_TOAST_BODY"] = one_line(body, 300) or one_line(subject, 300)
+    try:
+        proc = subprocess.run([osascript, "-e", MAC_TOAST_SCRIPT],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=TOAST_TIMEOUT_S, errors="replace", env=env)
+    except subprocess.TimeoutExpired:
+        return False, f"osascript did not answer within {TOAST_TIMEOUT_S}s"
+    except (OSError, subprocess.SubprocessError) as err:
+        return False, f"osascript could not be run ({type(err).__name__})"
+    if proc.returncode != 0:
+        return False, one_line(proc.stderr or "osascript failed", 200)
+    return True, ""
+
+
 def toast(subject, body, urgency="info"):
     """Raise a desktop notification. Returns (ok, reason).
 
@@ -112,6 +146,9 @@ def toast(subject, body, urgency="info"):
     """
     shell = powershell_path()
     if not shell:
+        mac = osascript_path()
+        if mac:
+            return toast_macos(mac, subject, body, urgency)
         return False, "no desktop on this box (powershell.exe not reachable)"
     tag = {"error": "Error", "warn": "Warning"}.get(urgency, "Information")
     env = dict(os.environ)

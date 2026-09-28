@@ -195,7 +195,10 @@ def write_private(path, text):
     os.replace guarantees the file is never TORN. It guarantees nothing at all about
     two writers sharing a staging path.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # parents=False, like log(): every path written here sits directly under the
+    # home, which tick() has already created or refused. Rebuilding a deleted home
+    # from a cursor write mid-tick is how an orphaned courier came back to life.
+    path.parent.mkdir(parents=False, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     try:
         with tmp.open("w", encoding="utf-8") as handle:
@@ -420,7 +423,7 @@ def dead_letter(row, reason):
     delivery can be replayed once the recipient is back.
     """
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        STATE_DIR.mkdir(parents=False, exist_ok=True)
         with DEAD_LETTER.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({
                 "at": now(), "reason": reason,
@@ -438,7 +441,7 @@ def report(text):
     """
     path = QUEUE_DIR / f"{COURIER}.jsonl"
     try:
-        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+        QUEUE_DIR.mkdir(parents=False, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({
                 "at": now(), "sender": COURIER, "recipient": None,
@@ -465,7 +468,7 @@ def render(message):
 def deliver_to_inbox(message):
     """Append to a virtual recipient's inbox. Always available, so never retried."""
     path = INBOX_DIR / f"{message['recipient']}.jsonl"
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    INBOX_DIR.mkdir(parents=False, exist_ok=True)
     os.chmod(INBOX_DIR, 0o700)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(message) + "\n")
@@ -787,7 +790,12 @@ def watch(interval, from_start):
     try:
         # One full pass up front to populate the cursor cache; work_waiting() reads
         # that cache, so before the first tick it has nothing to compare against.
-        summary = tick(from_start=first)
+        # require_home here too. The pidfile above means the home exists by now, so
+        # this refuses nothing legitimate - but a home deleted DURING this first pass
+        # was otherwise rebuilt by its mkdir(parents=True), and the loop below then
+        # found a home and served it forever. A slow first tick (tmux is slower to
+        # answer on macOS) made that window wide enough to hit.
+        summary = tick(from_start=first, require_home=True)
         first = False
         while True:
             # THE HOME IS THE COURIER'S REASON TO EXIST, AND IT CAN BE TAKEN AWAY.
@@ -825,6 +833,13 @@ def watch(interval, from_start):
             time.sleep(interval)
     except HomeGone as gone:
         log(f"{gone} went away mid-tick - nothing left to deliver, stopping")
+        return 0
+    except FileNotFoundError:
+        # A write below the home failed because the home itself went. That is the
+        # same stop as HomeGone; any other missing file is a real fault.
+        if ROOT.is_dir():
+            raise
+        log(f"{ROOT} went away mid-tick - nothing left to deliver, stopping")
         return 0
     except KeyboardInterrupt:
         log("courier stopped")

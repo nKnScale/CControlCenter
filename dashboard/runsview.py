@@ -123,7 +123,7 @@ def review_diff(run_id):
             rejected.append(name)         # never let a path become a git flag
             continue
         try:
-            (REPO / name).resolve().relative_to(REPO)
+            (REPO / name).resolve().relative_to(REPO.resolve())
         except (OSError, ValueError):
             rejected.append(name)
             continue

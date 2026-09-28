@@ -201,6 +201,12 @@ class MCP:
             self.proc.wait()
         except ProcessLookupError:
             self.proc.wait()
+        except PermissionError:
+            # macOS answers EPERM rather than ESRCH when the group's only member has
+            # already exited and is a zombie. That is the same "nothing left to stop"
+            # as above; anything else really is a refusal and must surface.
+            if self.proc.poll() is None:
+                raise
         for stream in (self.proc.stdin, self.proc.stdout):
             stream.close()
 

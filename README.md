@@ -59,7 +59,8 @@ brew install tmux        # the one thing macOS does not ship
 
 No GNU coreutils needed. Where a GNU-only tool or flag was load-bearing
 (`tac`, `timeout`, `flock`, `setsid`, `stat -c`, `date -Is`, `grep -oP`, `wc -l`'s
-unpadded output, `/proc`) the code now detects the capability and falls back,
+unpadded output, `/proc`, bash 4.1's `exec {fd}>`) the code now detects the
+capability and falls back,
 always trying the GNU form first so a Linux run takes exactly the branch it
 always took. There are no `uname` checks.
 
@@ -68,7 +69,9 @@ Two things are WSL-only and say so when run elsewhere:
 early without one) and `--cwd 'C:\...'` drive-letter translation, which needs
 `wslpath`. `--iface` on `bootp_probe.py` is Linux-only too: macOS accepts
 `SO_BINDTODEVICE` without implementing it, so the probe listens on every
-interface there.
+interface there. PROFINET DCP (`taskmgmt/pn_dcp.py`) needs Linux's `AF_PACKET` raw
+sockets and refuses with that reason on macOS. Desktop notifications use
+Notification Center (`osascript`) where there is no Windows toast to reach.
 
 ## Orchestration: who may say the work is finished
 

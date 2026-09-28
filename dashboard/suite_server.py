@@ -35,7 +35,7 @@ def _ps_candidates():
     """
     try:
         listing = subprocess.run(['ps', '-axww', '-o', 'pid=,command='],
-                                 capture_output=True, text=True, check=True).stdout
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         return
     for line in listing.splitlines():
@@ -44,12 +44,12 @@ def _ps_candidates():
             continue
         try:
             cwd_out = subprocess.run(['lsof', '-a', '-p', pid, '-d', 'cwd', '-Fn'],
-                                     capture_output=True, text=True).stdout
+                                     stdin=subprocess.DEVNULL, capture_output=True, text=True).stdout
             cwd = next((l[1:] for l in cwd_out.splitlines() if l.startswith('n')), None)
             if not cwd:
                 continue
             env_out = subprocess.run(['ps', 'eww', '-p', pid, '-o', 'command='],
-                                     capture_output=True, text=True).stdout
+                                     stdin=subprocess.DEVNULL, capture_output=True, text=True).stdout
             env = {}
             for token in env_out.split():
                 if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', token):

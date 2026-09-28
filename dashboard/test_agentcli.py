@@ -15,7 +15,9 @@ from http.server import ThreadingHTTPServer
 
 CLI = Path(__file__).resolve().parents[1] / "taskmgmt/coordination.py"
 TEMP = tempfile.TemporaryDirectory(prefix="agentcli-suite-")
-BASE = Path(TEMP.name)
+# resolve(): macOS hands out /var/folders/..., a symlink into /private/var, and the
+# CLI reports the resolved path.
+BASE = Path(TEMP.name).resolve()
 os.environ["HOME"] = str(BASE / "home")
 os.environ["AGENTMUX_HOME"] = str(BASE / "home/.agentmux")
 os.environ.pop("CC_ENFORCE", None)

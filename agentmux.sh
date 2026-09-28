@@ -79,6 +79,45 @@ file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 # byte format matters.
 iso_now() { date -Iseconds; }
 
+# `exec {var}>file` (an allocated descriptor) is bash 4.1+, and macOS ships bash
+# 3.2, where it fails at run time as "exec: {var}: not found". flock is util-linux
+# and absent from stock macOS as well. Callers that need both test this and
+# otherwise use mkdir_lock, so a Linux run keeps its exact flock path.
+can_flock_fd() {
+  command -v flock >/dev/null 2>&1 || return 1
+  [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }
+}
+
+# Blocking lock on a directory: mkdir is atomic on every POSIX filesystem. The
+# owner pid is recorded so a lock left by a dead process is reclaimed instead of
+# wedging every later caller; an owner-less lock (the holder died between mkdir
+# and writing its pid) is reclaimed after about five seconds.
+mkdir_lock() {
+  local dir="$1" owner unowned=0
+  until mkdir "$dir" 2>/dev/null; do
+    owner="$(cat "$dir/pid" 2>/dev/null)"
+    if [ -n "$owner" ]; then
+      unowned=0
+      kill -0 "$owner" 2>/dev/null || { rm -rf "$dir"; continue; }
+    else
+      unowned=$((unowned + 1))
+      [ "$unowned" -gt 50 ] && { rm -rf "$dir"; unowned=0; continue; }
+    fi
+    sleep 0.1
+  done
+  printf '%s\n' "$$" > "$dir/pid"
+}
+
+# setsid(1) is util-linux too. This program does setsid(2) and then execs, so the
+# process keeps the pid the caller's $! recorded - which is also why call sites use
+# it directly rather than through a shell function: backgrounding a function forks
+# a subshell, and $! would name that instead. A backgrounded job in a
+# non-interactive shell is never a process-group leader, so setsid(2) succeeds.
+SETSID_PY='import os, sys
+try: os.setsid()
+except OSError: pass
+os.execvp(sys.argv[1], sys.argv[1:])'
+
 # GNU coreutils `timeout` does not exist on macOS. Provide the subset used here -
 # `run_timeout SECONDS cmd...`, exiting 124 on expiry like the real one. No
 # --kill-after and no --signal; stdin is inherited. Every call site uses the plain
@@ -676,9 +715,17 @@ cmd_spawn() (
   esac
   # Protect config GC and same-name preparation until the pane exists. flock is
   # released by this subshell even on validation/config/launch failure.
-  local spawn_lock
-  exec {spawn_lock}>"$ROOT/.spawn.lock" || die "cannot open spawn lock"
-  flock -x "$spawn_lock" || die "cannot lock spawn"
+  local spawn_lock="" spawn_lockdir=""
+  if can_flock_fd; then
+    exec {spawn_lock}>"$ROOT/.spawn.lock" || die "cannot open spawn lock"
+    flock -x "$spawn_lock" || die "cannot lock spawn"
+  else
+    # No descriptor to release on exit here, so the EXIT trap does it - this is a
+    # subshell, so the trap cannot leak into the caller.
+    spawn_lockdir="$ROOT/.spawn.lock.d"
+    mkdir_lock "$spawn_lockdir" || die "cannot lock spawn"
+    trap 'rm -rf "$spawn_lockdir" 2>/dev/null' EXIT
+  fi
   have "$name" && die "agent '$name' already exists (kill it first)"
   claude_config_gc
 
@@ -728,7 +775,7 @@ try:
 except Exception:
     pass' "$ROOT/orchestrator.warrant" 2>/dev/null)"
     if [ -n "$warranted" ] && [ "$warranted" = "$name" ]; then
-      case "$(stat -c '%a' "$ROOT/orchestrator.env" 2>/dev/null)" in
+      case "$(file_mode "$ROOT/orchestrator.env")" in
         600|400) env_prefix="$env_prefix set -a; . '$ROOT/orchestrator.env'; set +a;" ;;
         *) printf "agentmux: %s/orchestrator.env is not mode 0600 - refusing to load it.
 " "$ROOT" >&2; return 1 ;;
@@ -813,7 +860,7 @@ except Exception:
       printf 'agentmux: degraded: %s named tool restrictions recorded in persona\n' "$cli" >&2
     fi
     chmod 600 "$persona_tmp" && mv -f "$persona_tmp" "$RUNDIR/$name.persona" || die "cannot publish private persona"
-    [ "$(stat -c '%a' "$RUNDIR/$name.persona")" = 600 ] || die "persona must be mode 0600"
+    [ "$(file_mode "$RUNDIR/$name.persona")" = 600 ] || die "persona must be mode 0600"
     printf -v quoted_path '%q' "$RUNDIR/$name.persona"
     env_prefix="$env_prefix export AGENTMUX_PERSONA_FILE=$quoted_path;"
   else
@@ -823,8 +870,12 @@ except Exception:
   tm new-session -d -s "$name" -c "$cwd" -x "$COLS" -y "$ROWS" \
      "${env_prefix} exec ${launch}" \
      || die "failed to start tmux session"
-  flock -u "$spawn_lock"
-  exec {spawn_lock}>&-
+  if [ -n "$spawn_lock" ]; then
+    flock -u "$spawn_lock"
+    exec {spawn_lock}>&-
+  else
+    rm -rf "$spawn_lockdir" 2>/dev/null; trap - EXIT
+  fi
 
   local pane
   pane="$(tm list-panes -t "$name" -F '#{pane_id}' 2>/dev/null | head -1)"
@@ -2401,11 +2452,13 @@ start_idle_watchdog() {
 #
 # Done in the CHILD rather than at each call site so it holds for every caller,
 # including ones that have not been written yet.
-for _fd in /proc/self/fd/*; do
+# /proc is Linux-only; macOS lists the same table under /dev/fd.
+_fddir=/proc/self/fd; [ -d "\$_fddir" ] || _fddir=/dev/fd
+for _fd in "\$_fddir"/*; do
   _n="\${_fd##*/}"
   [ "\$_n" -gt 2 ] 2>/dev/null && eval "exec \$_n>&-" 2>/dev/null
 done
-unset _fd _n
+unset _fd _n _fddir
 
 # STOP WHEN THIS HOME GOES, not only when the tmux server empties.
 #
@@ -2424,7 +2477,11 @@ done
 rm -f "$RUNDIR/.idle.pid" "$self" 2>/dev/null
 WATCHDOG
   chmod +x "$self" 2>/dev/null
-  setsid bash "$self" >/dev/null 2>&1 &
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash "$self" >/dev/null 2>&1 &
+  else
+    python3 -c "$SETSID_PY" bash "$self" >/dev/null 2>&1 &
+  fi
   printf '%s\n' "$!" > "$RUNDIR/.idle.pid"
   return 0
 }

@@ -168,7 +168,12 @@ class Client:
         if not math.isfinite(timeout) or timeout <= 0 or timeout > 60:
             raise ValueError('timeout must be > 0 and <= 60 seconds')
         self.timeout, self.iface = timeout, iface
-        self.sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETHERTYPE))
+        # AF_PACKET is Linux-only. macOS reaches layer 2 through BPF instead, which
+        # this helper does not implement - say so rather than die on AttributeError.
+        family = getattr(socket, 'AF_PACKET', None)
+        if family is None:
+            raise DCPError('PROFINET DCP needs Linux raw sockets (AF_PACKET); run it on Linux')
+        self.sock = socket.socket(family, socket.SOCK_RAW, socket.htons(ETHERTYPE))
         try:
             self.sock.bind((iface, 0))
             address = self.sock.getsockname()

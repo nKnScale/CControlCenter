@@ -172,7 +172,10 @@ class ProtocolTests(unittest.TestCase):
             with patch.object(dcp.socket, 'socket') as create, self.assertRaises(ValueError):
                 dcp.Client('eth0', value)
             create.assert_not_called()
-        with patch.object(dcp.socket, 'socket') as create:
+        # create=True: AF_PACKET does not exist off Linux, and this checks the close on
+        # a wrong interface type, not the platform refusal in front of it.
+        with patch.object(dcp.socket, 'socket') as create, \
+             patch.object(dcp.socket, 'AF_PACKET', 17, create=True):
             create.return_value.getsockname.return_value = ('lo', 0, 0, 772, bytes(6))
             with self.assertRaises(dcp.DCPError):
                 dcp.Client('lo')

@@ -16,7 +16,8 @@ from http.server import ThreadingHTTPServer
 
 # Set all discovery/store roots before importing any dashboard module.
 TEMP = tempfile.TemporaryDirectory(prefix="boardagents-suite-")
-BASE = Path(TEMP.name)
+# resolve(): macOS temp dirs sit behind the /var -> /private/var symlink.
+BASE = Path(TEMP.name).resolve()
 os.environ["HOME"] = str(BASE / "home")
 os.environ["AGENTMUX_HOME"] = str(BASE / "home/.agentmux")
 os.environ.pop("CC_ENFORCE", None)
