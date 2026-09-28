@@ -241,6 +241,25 @@ codex_yolo_profile() {
   printf '%s' "$file"
 }
 
+# macOS keeps claude's interactive login in the Keychain, not in a file the mirror
+# could link, under "Claude Code-credentials-<first 8 hex of sha256(CLAUDE_CONFIG_DIR)>".
+# Every agent has its own config dir, so a NEW agent name starts logged out and sits on
+# a sign-in screen. Say so at spawn rather than leave it to be found in the pane. Only
+# the entry's existence is asked; nothing is read from it. Silent off macOS, and when
+# a CLAUDE_CODE_OAUTH_TOKEN (the claude-oauth-token method) will log it in instead.
+claude_keychain_note() {
+  command -v security >/dev/null 2>&1 || return 0
+  [ -f "$ROOT/env" ] && grep -q '^CLAUDE_CODE_OAUTH_TOKEN=.' "$ROOT/env" 2>/dev/null && return 0
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && return 0
+  local hash
+  hash="$(printf '%s' "$1" | shasum -a 256 2>/dev/null | cut -c1-8)"
+  [ -n "$hash" ] || return 0
+  security find-generic-password -s "Claude Code-credentials-$hash" >/dev/null 2>&1 && return 0
+  printf 'agentmux: note: this agent name has no claude login on this Mac yet - it will ask to sign in.\n' >&2
+  printf '          sign in once:  agentmux attach %s   (then /login; the name keeps it)\n' "${1##*/}" >&2
+  printf '          or for every agent:  python3 taskmgmt/setup_auth.py claude-oauth-token\n' >&2
+}
+
 claude_config_dir() {
   local name="$1" posture="$2" tools="$3" deny_tools="$4"
   local d="$ROOT/claude-config/$name" src entry base tmp
@@ -615,6 +634,12 @@ PY
 cmd_spawn() (
   local name="${1:-}"; shift || true
   [ -n "$name" ] || die "spawn needs a name"
+  # The name is positional, so `spawn --help` used to START AN AGENT called --help -
+  # found when an orchestrator asked for usage and got an idle unrestricted pane.
+  case "$name" in
+    -h|--help) usage; return 0 ;;
+    -*) die "spawn: the agent name comes first and cannot start with '-' (got '$name')" ;;
+  esac
   local cli="codex" cwd="$PWD" model="" task="" summary="" created="" auth=""
   local agentdef="" posture="unrestricted" persona_file="" tools="" deny_tools="" team="" role=""
   local posture_explicit=0
@@ -809,6 +834,7 @@ except Exception:
       ccd="$(claude_config_dir "$name" "$posture" "$tools" "$deny_tools")" || die "could not prove claude posture '$posture'"
       printf -v quoted_path '%q' "$ccd"
       env_prefix="$env_prefix export CLAUDE_CONFIG_DIR=$quoted_path;"
+      claude_keychain_note "$ccd"
       printf -v quoted_path '%q' "$ccd/settings.json"
       launch="claude${model:+ --model $quoted_model} --settings $quoted_path --setting-sources ''"
       if [ "$bypass" = 0 ]; then
@@ -1631,8 +1657,15 @@ cmd_run() {
     esac
   done
 
+  # start and complete take NO --by. run.py attributes both to `orchestrator` and
+  # proves it from the pane - no $AGENTMUX_AGENT for a person, or a warrant naming
+  # this pane - and REFUSES any other claimed name. Passing "$me" handed a warranted
+  # pane `--by ccc-orchestrator`, which run.py rightly rejected, so the warrant could
+  # never work through this wrapper. The first orchestrator to meet that refusal
+  # routed around it with `env -u AGENTMUX_AGENT`, i.e. by posing as the operator,
+  # and completed its run without the approval the warrant exists to require.
   case "$action" in
-    start)    python3 "$(run_py)" start "${1:?a one-line description of the request}" --by "$me" ;;
+    start)    python3 "$(run_py)" start "${1:?a one-line description of the request}" ;;
     assign)   python3 "$(run_py)" assign "$@" ;;
     submit)   python3 "$(run_py)" submit "${1:-${AGENTMUX_JOB:-}}" --by "$me" "${@:2}" ;;
     verdict)  python3 "$(run_py)" verdict "$@" --by "$me" ;;
@@ -1652,7 +1685,7 @@ cmd_run() {
       # Tell run.py to skip its "close them yourself" line: we are about to.
       local will=""
       [ "${AGENTMUX_KEEP_AGENTS:-}" = "1" ] || will=1
-      AGENTMUX_WILL_TEARDOWN="$will" python3 "$(run_py)" complete "$@" --by "$me" || return $?
+      AGENTMUX_WILL_TEARDOWN="$will" python3 "$(run_py)" complete "$@" || return $?
       if [ "${AGENTMUX_KEEP_AGENTS:-}" = "1" ]; then
         printf '  agents kept (AGENTMUX_KEEP_AGENTS=1); close them with: agentmux run teardown %s\n' "$run_id"
       else

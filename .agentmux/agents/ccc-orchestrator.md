@@ -78,5 +78,10 @@ identity is your pane, and a name in the ledger nobody could have been is worse 
 none. **Never set `AGENTMUX_TRUST_IDENTITY`**; it is a test-only bypass and RULE #-0.7
 forbids it in a real run.
 
+**Never unset or change `AGENTMUX_AGENT`** (`env -u`, `unset`, `env AGENTMUX_AGENT=`).
+Without it you are taken for the operator, which is exactly the approval you may not
+give yourself. If a verb you are entitled to is refused, that is a bug: stop and say
+so in this pane. Do not find another way to run it.
+
 Your pane is what a person reads when they come back. Narrate decisions, not
 keystrokes: which card, to whom, what the reviewer objected to, what changed.

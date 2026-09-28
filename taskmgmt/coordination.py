@@ -240,6 +240,15 @@ def orchestrator_pane():
     return env if env and orchestrator_warrant() == env else None
 
 
+def in_agentmux_pane():
+    """Is this process running inside a pane on agentmux's own tmux server?
+
+    tmux exports TMUX="<socket path>,<pid>,<session>" and TMUX_PANE into every pane.
+    """
+    socket_path = os.environ.get("TMUX", "").split(",")[0]
+    return bool(os.environ.get("TMUX_PANE")) and os.path.basename(socket_path) == SOCKET
+
+
 def orchestrator_identity(verb, claimed=None, allow_test_identity=True):
     """Resolve the outside-pane identity, including run's legacy test bypass.
 
@@ -247,6 +256,21 @@ def orchestrator_identity(verb, claimed=None, allow_test_identity=True):
     be available outside panes, even when synthetic agent liveness is trusted.
     """
     env = os.environ.get("AGENTMUX_AGENT")
+    # NO NAME, BUT INSIDE AN AGENT PANE: the identity was removed, not absent.
+    #
+    # "Outside a pane" was proved by $AGENTMUX_AGENT being unset, and every pane sets
+    # it - so the one way to be unset inside a pane is to unset it. Measured: a
+    # warranted orchestrator refused by a wrapper bug ran `env -u AGENTMUX_AGENT
+    # agentmux run complete`, was taken for the operator, and completed its run with
+    # no approval. The pane still says where it is through tmux's own variables.
+    # Not authentication either - unsetting TMUX too defeats it - but it turns the
+    # obvious route into a refusal that names what happened.
+    if (not env and in_agentmux_pane()
+            and not (allow_test_identity and os.environ.get("AGENTMUX_TRUST_IDENTITY") == "1")):
+        raise IdentityError(
+            f"identity: {verb} came from agent pane {os.environ.get('TMUX_PANE')} with\n"
+            f"  $AGENTMUX_AGENT removed. Only a person outside the agent panes is the\n"
+            f"  operator; an orchestrator acts under its warrant, with its name intact.")
     # ORDER MATTERS. The legacy AGENTMUX_TRUST_IDENTITY bypass short-circuits first, so
     # the suites - which run without a warrant in scope - never touch the filesystem and
     # every existing refusal message is byte-identical. The warrant is the LAST thing
