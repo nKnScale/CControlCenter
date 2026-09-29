@@ -196,5 +196,85 @@ names 'consent is named, and so is its lethal default' 'No, exit' \
 names 'an account chooser is named' 'account' '  ❯ 1. Claude account with subscription
     2. Anthropic Console account'
 
+echo '--- standing consent: the operator decides once, per kind ---'
+# The decisions above stay decisions. What an operator may do is make one ONCE, for a
+# kind they always answer the same way, and have it recorded. Pinned here: which
+# prompts are consent-able, that nothing is answered without a grant, and that a bad
+# grant file answers nothing at all.
+eval "$(sed -n '/^file_mode() {/,/}$/p' "$GUARD" | head -1)"
+eval "$(sed -n '/^consent_kind() {/,/^}/p' "$GUARD")"
+eval "$(sed -n '/^consent_keys() {/,/^}/p' "$GUARD")"
+eval "$(sed -n '/^consent_granted() {/,/^}/p' "$GUARD")"
+eval "$(sed -n '/^consent_answer() {/,/^}/p' "$GUARD")"
+CONSENT_KINDS="$(sed -n 's/^CONSENT_KINDS="\(.*\)"$/\1/p' "$GUARD")"
+CTMP="$(mktemp -d)"; trap 'rm -f "$GUARD"; rm -rf "$CTMP"' EXIT
+CONSENT_FILE_DEFAULT="$CTMP/none.json"
+BYPASS='  WARNING: Claude Code running in Bypass Permissions mode
+  By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.
+  ❯ No, exit
+    Yes, I accept
+  Enter to confirm · Esc to cancel'
+CTRUST='  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings.
+› 1. Trust and continue
+  2. Back to Agent Command Center
+  enter continue · esc back'
+GTRUST='                                          Do you trust the contents of this directory?
+                                       /Users/someone/dayJob/omen-integration-mock
+                                    Grok Build may run or modify contents in this directory,
+                                                     posing security risks.
+                                                 Yes, proceed                 y
+                                                 No, quit                     n'
+grant_file() {  # grant_file <path> <mode> <kind...>
+  local path="$1" mode="$2"; shift 2
+  python3 - "$path" "$@" <<'PY'
+import json, sys
+json.dump({'grants': {k: {'by': 'test', 'at': 'now'} for k in sys.argv[2:]}}, open(sys.argv[1], 'w'))
+PY
+  chmod "$mode" "$path"
+}
+consent_is() {  # consent_is <label> <expected-keys|NONE> <text> <file>
+  local got
+  if got="$(consent_answer "$3" "$4")"; then got="${got%%|*}"; else got=NONE; fi
+  if [ "$got" = "$2" ]; then printf '  ok    %-56s %s\n' "$1" "$2"; pass=$((pass + 1))
+  else printf '  FAIL  %-56s got %s, wanted %s\n' "$1" "$got" "$2"; fail=$((fail + 1)); fi
+}
+[ "$(consent_kind "$BYPASS")" = claude-bypass ] && { printf '  ok    %-56s\n' 'claude bypass warning is a consent kind'; pass=$((pass + 1)); } \
+  || { printf '  FAIL  claude bypass warning not recognised\n'; fail=$((fail + 1)); }
+[ "$(consent_kind "$CTRUST")" = codex-folder-trust ] && { printf '  ok    %-56s\n' 'codex folder trust is a consent kind'; pass=$((pass + 1)); } \
+  || { printf '  FAIL  codex folder trust not recognised\n'; fail=$((fail + 1)); }
+if consent_kind '  ❯ 1. Claude account with subscription
+    2. Anthropic Console account' >/dev/null || consent_kind '  Overwrite the file? [y/n]' >/dev/null; then
+  printf '  FAIL  an account chooser or y/n became consent-able\n'; fail=$((fail + 1))
+else printf '  ok    %-56s\n' 'account choice and y/n are never consent-able'; pass=$((pass + 1)); fi
+
+consent_is 'no grant file: bypass is left for a person'     NONE         "$BYPASS" "$CTMP/none.json"
+grant_file "$CTMP/ok.json" 600 claude-bypass
+consent_is 'granted: bypass moves off "No, exit", confirms'  'Down Enter' "$BYPASS" "$CTMP/ok.json"
+consent_is 'granting bypass does not grant folder trust'     NONE         "$CTRUST" "$CTMP/ok.json"
+grant_file "$CTMP/both.json" 600 claude-bypass codex-folder-trust
+consent_is 'granted: codex trust presses 1'                  1            "$CTRUST" "$CTMP/both.json"
+consent_is 'grok trust is not granted by the codex grant'    NONE         "$GTRUST" "$CTMP/both.json"
+grant_file "$CTMP/grok.json" 600 grok-folder-trust
+consent_is 'granted: grok trust presses y'                   y            "$GTRUST" "$CTMP/grok.json"
+grant_file "$CTMP/loose.json" 644 claude-bypass
+consent_is 'a group/world-readable grant file is ignored'    NONE         "$BYPASS" "$CTMP/loose.json"
+ln -s "$CTMP/ok.json" "$CTMP/link.json"
+consent_is 'a symlinked grant file is ignored'               NONE         "$BYPASS" "$CTMP/link.json"
+printf '{not json' > "$CTMP/bad.json"; chmod 600 "$CTMP/bad.json"
+consent_is 'an unparseable grant file is ignored'            NONE         "$BYPASS" "$CTMP/bad.json"
+consent_is 'the built-in guard is unchanged by consent'      NONE         '  Do you trust the files in this folder?
+  ❯ No, exit
+    Yes, I trust this folder' "$CTMP/both.json"
+
+# Only a person at a terminal grants: refused in a pane, refused with no TTY.
+out="$(AGENTMUX_HOME="$CTMP/h" AGENTMUX_AGENT=someone bash "$GUARD" consent grant claude-bypass </dev/null 2>&1)"
+case "$out" in *"inside an agent pane"*) printf '  ok    %-56s\n' 'grant refused inside an agent pane'; pass=$((pass + 1)) ;;
+  *) printf '  FAIL  grant inside a pane was not refused: %s\n' "$out"; fail=$((fail + 1)) ;; esac
+out="$(env -u AGENTMUX_AGENT AGENTMUX_HOME="$CTMP/h" bash "$GUARD" consent grant claude-bypass </dev/null 2>&1)"
+case "$out" in *"interactive terminal"*) printf '  ok    %-56s\n' 'grant refused without a terminal'; pass=$((pass + 1)) ;;
+  *) printf '  FAIL  grant without a TTY was not refused: %s\n' "$out"; fail=$((fail + 1)) ;; esac
+[ ! -e "$CTMP/h/consent.json" ] && { printf '  ok    %-56s\n' 'a refused grant writes nothing'; pass=$((pass + 1)); } \
+  || { printf '  FAIL  a refused grant wrote consent.json\n'; fail=$((fail + 1)); }
+
 finish
 [ "$fail" -eq 0 ] || exit 1

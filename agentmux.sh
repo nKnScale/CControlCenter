@@ -429,6 +429,13 @@ agentmux - drive other agent CLIs in tmux panes
                                to answer a modal, or --force to override
   key    <name> <keys...>      tmux key names only, no text, no implicit Enter
                                (Enter, Escape, Down, C-c) - use for modals
+  unblock [<name>...] [--dry-run]
+                               answer the startup prompts it knows; spawn runs it too
+  consent list | grant <kind> | revoke <kind>
+                               standing operator consent for a prompt you always answer
+                               the same way (claude-bypass, codex-folder-trust,
+                               grok-folder-trust). Grant
+                               needs you at a terminal - an agent cannot grant it
   read   <name> [--lines N]    current pane contents, ANSI stripped
   tail   <name> [--lines N]    scrollback log for the agent
   wait   <name> [--timeout S] [--quiet S]
@@ -1048,8 +1055,29 @@ except Exception:
       "${AGENTMUX_IDLE_MINUTES:-$IDLE_MINUTES}"
   fi
   case "$cli" in codex|claude|grok|gemini) printf '  posture: %s\n' "$posture" ;; esac
+  spawn_unblock "$name"
   printf "watch it:  %s\n" "$(attach_hint "$name")"
 )
+
+# Clear the startup prompts unblock knows (built-in nuisances, plus any kind the
+# operator granted standing consent for) before anything is sent to a new pane.
+# Several can arrive in a row, so it keeps looking until the pane has been at its
+# normal input for a few polls, a prompt needs a person, or the budget runs out.
+# AGENTMUX_SPAWN_UNBLOCK_SECS=0 turns it off.
+spawn_unblock() {
+  local name="$1" budget="${AGENTMUX_SPAWN_UNBLOCK_SECS:-20}" out quiet=0 i=0
+  [ "$budget" -gt 0 ] 2>/dev/null || return 0
+  while [ "$i" -lt "$budget" ]; do
+    sleep 1; i=$((i + 1))
+    out="$(cmd_unblock "$name" 2>/dev/null)"
+    case "$out" in
+      *"pressed "*)        printf '  startup: %s\n' "$(printf '%s' "$out" | grep 'pressed ' | sed 's/^ *//' | head -1)"; quiet=0 ;;
+      *"NEEDS A PERSON"*)  printf '  startup: waiting on a prompt only you can answer - agentmux unblock %s\n' "$name"; return 0 ;;
+      *working*)           quiet=$((quiet + 1)); [ "$quiet" -ge 3 ] && return 0 ;;
+    esac
+  done
+  return 0
+}
 
 # Does the pane currently show a blocking prompt that is NOT the agent's normal input?
 #
@@ -1159,6 +1187,133 @@ modal_decision() {
   return 1
 }
 
+# ── standing consent ─────────────────────────────────────────────────────────
+#
+# THE DECISIONS ABOVE ARE STILL DECISIONS - BUT AN OPERATOR MAY MAKE ONE ONCE.
+#
+# modal_decision exists because trust and bypass consent are choices, not nuisances.
+# On a machine where the operator has decided "every agent I spawn runs unrestricted
+# in a repo I own", being asked again on every spawn is not safety, it is a pane that
+# waits hours for a click. So the operator can record the decision once, per KIND of
+# prompt, and unblock answers that kind on their behalf from then on.
+#
+# What keeps this from being "click through everything":
+#   - only the kinds listed in CONSENT_KINDS, each matched on the exact text its CLI
+#     draws and answered with keys verified against a live pane;
+#   - granting needs a human: refused inside any agent pane, refused without a TTY,
+#     and the kind must be typed back to confirm - so no agent can grant itself;
+#   - the grant file is ~/.agentmux/consent.json, 0600 and not a symlink, or it is
+#     ignored and nothing is answered (fail closed);
+#   - every consented answer is appended to consent.log with the agent and the time.
+CONSENT_KINDS="claude-bypass codex-folder-trust grok-folder-trust"
+CONSENT_FILE_DEFAULT="$ROOT/consent.json"
+
+consent_describe() {
+  case "$1" in
+    claude-bypass)      printf 'claude "Bypass Permissions mode" warning -> Yes, I accept' ;;
+    codex-folder-trust) printf 'codex "Trust this folder?" -> 1. Trust and continue' ;;
+    grok-folder-trust)  printf 'grok "Do you trust the contents of this directory?" -> Yes, proceed' ;;
+    *) return 1 ;;
+  esac
+}
+
+# The kind of consent-gated prompt this text is, if any. Pure text, so the guard
+# suite can pin it without tmux.
+consent_kind() {
+  local text="$1"
+  if printf '%s' "$text" | grep -Eqi 'bypass permissions mode|accept all responsibility' &&
+     printf '%s' "$text" | grep -Eqi 'yes, i accept' &&
+     printf '%s' "$text" | grep -Eqi 'no, exit'; then
+    printf 'claude-bypass'; return 0
+  fi
+  if printf '%s' "$text" | grep -Eqi 'trust this folder\?' &&
+     printf '%s' "$text" | grep -Eqi '1\. trust and continue'; then
+    printf 'codex-folder-trust'; return 0
+  fi
+  if printf '%s' "$text" | grep -Eqi 'do you trust the contents of this directory' &&
+     printf '%s' "$text" | grep -Eqi 'grok build may run or modify' &&
+     printf '%s' "$text" | grep -Eqi 'yes, proceed'; then
+    printf 'grok-folder-trust'; return 0
+  fi
+  return 1
+}
+
+# Keys for a kind. claude-bypass: VERIFIED 2026-09-29 on a live pane - the list is
+# "❯ No, exit / Yes, I accept", so Down moves off the lethal default and Enter
+# confirms. codex-folder-trust: VERIFIED 2026-09-29 - "› 1. Trust and continue",
+# and codex selects a numbered option on its digit, as the update-nag "2" does.
+# grok-folder-trust: VERIFIED 2026-09-29 - "Yes, proceed  y / No, quit  n", so y.
+consent_keys() {
+  case "$1" in
+    claude-bypass)      printf 'Down Enter' ;;
+    codex-folder-trust) printf '1' ;;
+    grok-folder-trust)  printf 'y' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Is KIND granted in FILE? Fails closed on a missing, linked, loose-mode or
+# unparseable file.
+consent_granted() {
+  local kind="$1" file="${2:-${AGENTMUX_CONSENT_FILE:-$CONSENT_FILE_DEFAULT}}"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(file_mode "$file")" = 600 ] || return 1
+  python3 - "$file" "$kind" <<'PYGRANT' 2>/dev/null
+import json, sys
+grants = json.load(open(sys.argv[1])).get('grants', {})
+sys.exit(0 if isinstance(grants.get(sys.argv[2]), dict) else 1)
+PYGRANT
+}
+
+# "<keys>|<what>|<why>" for a consent-gated prompt the operator has granted.
+consent_answer() {
+  local text="$1" file="${2:-}" kind
+  kind="$(consent_kind "$text")" || return 1
+  consent_granted "$kind" $file || return 1
+  printf '%s|%s|standing consent granted by the operator (agentmux consent list)' \
+    "$(consent_keys "$kind")" "$kind"
+}
+
+cmd_consent() {
+  local action="${1:-list}" kind="${2:-}" file="${AGENTMUX_CONSENT_FILE:-$CONSENT_FILE_DEFAULT}"
+  case "$action" in
+    list)
+      local k
+      for k in $CONSENT_KINDS; do
+        if consent_granted "$k" "$file"; then printf '  GRANTED  %-20s %s\n' "$k" "$(consent_describe "$k")"
+        else printf '  -        %-20s %s\n' "$k" "$(consent_describe "$k")"; fi
+      done ;;
+    grant|revoke)
+      [ -n "$kind" ] || die "consent $action <kind>   (kinds: $CONSENT_KINDS)"
+      consent_describe "$kind" >/dev/null || die "consent: unknown kind '$kind' (kinds: $CONSENT_KINDS)"
+      [ -z "${AGENTMUX_AGENT:-}" ] || die "consent: refused inside an agent pane - only the operator grants consent"
+      [ -t 0 ] || die "consent: needs an interactive terminal - run it yourself, not through an agent"
+      if [ "$action" = grant ]; then
+        printf 'Grant standing consent for:\n  %s\nEvery agent this harness spawns will have this answered for it.\n' \
+          "$(consent_describe "$kind")"
+        local typed; read -rp "Type '$kind' to confirm: " typed
+        [ "$typed" = "$kind" ] || die "consent: not confirmed; nothing changed"
+      fi
+      [ ! -L "$file" ] || die "consent: $file is a symlink; refusing"
+      ( umask 077; python3 - "$file" "$action" "$kind" "${USER:-unknown}" <<'PYSET'
+import datetime, json, os, pathlib, sys
+path, action, kind, who = sys.argv[1:]
+p = pathlib.Path(path)
+data = json.loads(p.read_text()) if p.is_file() else {}
+grants = data.setdefault('grants', {})
+if action == 'grant':
+    grants[kind] = {'by': who, 'at': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
+else:
+    grants.pop(kind, None)
+tmp = p.with_name(p.name + '.tmp')
+tmp.write_text(json.dumps(data, indent=2) + '\n'); os.chmod(tmp, 0o600); tmp.replace(p)
+PYSET
+      ) || die "consent: could not write $file"
+      printf 'consent %s: %s\n' "$([ "$action" = grant ] && echo granted || echo revoked)" "$kind" ;;
+    *) die "consent: list | grant <kind> | revoke <kind>   (kinds: $CONSENT_KINDS)" ;;
+  esac
+}
+
 cmd_unblock() {
   local dry=0 targets=""
   while [ $# -gt 0 ]; do
@@ -1195,11 +1350,30 @@ cmd_unblock() {
       fi
       continue
     fi
+    if answer="$(consent_answer "$text")"; then
+      keys="${answer%%|*}"; what="${answer#*|}"; why="${what#*|}"; what="${what%%|*}"
+      if [ "$dry" = 1 ]; then
+        printf '  %-22s WOULD press %-10s %s (%s)\n' "$name" "$keys" "$what" "$why"
+      else
+        # $keys is split on purpose: it comes from consent_keys, never from pane text.
+        # shellcheck disable=SC2086
+        tm send-keys -t "$pane" -- $keys
+        printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$what" "$keys" \
+          >> "$ROOT/consent.log"
+        printf '  %-22s pressed %-10s %s (%s)\n' "$name" "$keys" "$what" "$why"
+        freed=$((freed + 1))
+      fi
+      continue
+    fi
     stuck=$((stuck + 1))
     if decision="$(modal_decision "$text")"; then
       printf '  %-22s NEEDS A PERSON - %s\n' "$name" "$decision"
     else
       printf '  %-22s NEEDS A PERSON - an unrecognised prompt\n' "$name"
+    fi
+    local ckind
+    if ckind="$(consent_kind "$text")"; then
+      printf '                         always the same answer? grant it once: agentmux consent grant %s\n' "$ckind"
     fi
     printf '                         look:   agentmux read %s --lines 12\n' "$name"
     printf '                         answer: agentmux key %s <Escape|Down|Enter|2>\n' "$name"
@@ -2836,6 +3010,7 @@ case "${1:-}" in
   send)   shift; cmd_send   "$@" ;;
   key)    shift; cmd_key    "$@" ;;
   unblock) shift; cmd_unblock "$@" ;;
+  consent) shift; cmd_consent "$@" ;;
   read)   shift; cmd_read   "$@" ;;
   tail)   shift; cmd_tail   "$@" ;;
   wait)   shift; cmd_wait   "$@" ;;
