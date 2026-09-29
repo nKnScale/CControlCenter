@@ -271,6 +271,8 @@ run test_testlib.sh bash /dev/fd/8 8< <(tr -d '\r' < dashboard/test_testlib.sh)
 run check_test_failability.sh bash /dev/fd/11 11< <(tr -d '\r' < dashboard/check_test_failability.sh)
 run test_argguard.sh bash /dev/fd/9 9< <(tr -d '\r' < dashboard/test_argguard.sh)
 run test_modal_guard.sh bash /dev/fd/4 4< <(tr -d '\r' < dashboard/test_modal_guard.sh)
+# `send` must submit a long message to a TUI that assembles pastes slowly (codex).
+run test_send_paste.sh bash /dev/fd/4 4< <(tr -d '\r' < dashboard/test_send_paste.sh)
 run test_inbox_guard.sh bash /dev/fd/5 5< <(tr -d '\r' < dashboard/test_inbox_guard.sh)
 run test_coordination.sh bash /dev/fd/6 6< <(tr -d '\r' < dashboard/test_coordination.sh)
 run test_run.sh   bash /dev/fd/7 7< <(tr -d '\r' < dashboard/test_run.sh)

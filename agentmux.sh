@@ -1443,13 +1443,36 @@ cmd_send() {
   # is supposed to make impossible. A composer still holding a paste placeholder
   # after the Enter has not submitted, so send one more. Bounded at two extra tries,
   # and skipped entirely for short text, which no TUI defers.
+  #
+  # IT USED TO STOP LOOKING TOO SOON. Two checks 0.4s apart, and the loop broke on
+  # the first one that did not see a placeholder - but a large paste is still being
+  # ASSEMBLED at that point, so the placeholder had not been drawn yet, "no
+  # placeholder" read as "submitted", and the Enter that had arrived mid-assembly was
+  # lost. Measured 2026-09-29 on tm-037-worker2 (codex): a 4506-character post sat as
+  # "[Pasted Content 4506 chars]" until one more Enter by hand. So: look only at the
+  # composer (the bottom lines, not scrollback, where an earlier placeholder can
+  # linger), keep looking until it has read clear three polls running, and re-press
+  # Enter while a placeholder is showing - bounded in both polls and presses.
   if [ "${#text}" -ge "${AGENTMUX_SEND_PASTE_CHARS:-512}" ]; then
-    local try
-    for try in 1 2; do
-      sleep 0.4
-      tm capture-pane -p -t "$pane" 2>/dev/null \
-        | grep -qiE '\[pasted content|\[[0-9]+ lines pasted' || break
-      tm send-keys -t "$pane" Enter
+    # Three composer states: the placeholder (assembled, NOT submitted - press Enter),
+    # the start of our own text still in it (still arriving - wait, do not count it as
+    # clear), or neither (gone - submitted once that holds for three polls).
+    local polls=0 extra=0 clear=0 composer lead="${text:0:40}"
+    local budget="${AGENTMUX_SEND_CONFIRM_POLLS:-12}" every="${AGENTMUX_SEND_CONFIRM_INTERVAL:-0.4}"
+    while [ "$polls" -lt "$budget" ]; do
+      sleep "$every"; polls=$((polls + 1))
+      composer="$(tm capture-pane -p -t "$pane" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -6)"
+      if printf '%s' "$composer" | grep -qiE '\[pasted content|\[[0-9]+ lines pasted'; then
+        clear=0
+        [ "$extra" -lt 3 ] || break
+        tm send-keys -t "$pane" Enter
+        extra=$((extra + 1))
+      elif printf '%s' "$composer" | grep -qF -- "$lead"; then
+        clear=0
+      else
+        clear=$((clear + 1))
+        [ "$clear" -ge 3 ] && break
+      fi
     done
   fi
 }
