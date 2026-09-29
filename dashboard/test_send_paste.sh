@@ -118,5 +118,17 @@ elif cmd == 'capture-pane':
     reset(); t0 = time.time(); r = send('short message', FAKE_ASSEMBLY='0')
     assert r.returncode == 0 and pane()['enters'] == 1 and time.time() - t0 < 5, pane()
     check('short text is sent once, without polling')
+    # 7. CODEX, SHORT TEXT: the 512-char gate skipped the confirm loop, and a short pointer
+    #    message to tm-037-worker2 sat unsent twice on 2026-09-29 because codex dropped
+    #    the Enter. A codex agent is confirmed at any length.
+    rundir = root / 'home' / 'run'; rundir.mkdir(parents=True, exist_ok=True)
+    (rundir / 'worker.cli').write_text('codex\n')
+    reset(); r = send('read ~/.agentmux/dispatch/brief.md and do it',
+                      FAKE_ASSEMBLY='0', FAKE_NO_PLACEHOLDER='1', FAKE_SWALLOW='1')
+    assert r.returncode == 0, r.stderr
+    assert pane()['submitted'], ('short message to codex left unsent', pane())
+    assert pane()['enters'] <= 4, pane()
+    check('a short message to codex is confirmed too')
+    (rundir / 'worker.cli').unlink()
     print(f'passed {counter}, failed 0')
 PY

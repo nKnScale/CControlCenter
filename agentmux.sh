@@ -1453,7 +1453,12 @@ cmd_send() {
   # composer (the bottom lines, not scrollback, where an earlier placeholder can
   # linger), keep looking until it has read clear three polls running, and re-press
   # Enter while a placeholder is showing - bounded in both polls and presses.
-  if [ "${#text}" -ge "${AGENTMUX_SEND_PASTE_CHARS:-512}" ]; then
+  # CODEX IS CONFIRMED AT ANY LENGTH. Its composer treats any fast burst of typed
+  # characters as a paste, so it can drop the Enter even for a short line - and the
+  # lead's messages to tm-037-worker2 became short pointers to brief files, which slid
+  # under the 512-char gate and sat unsent in the composer twice on 2026-09-29.
+  local confirm_cli; confirm_cli="$(cat "$RUNDIR/$name.cli" 2>/dev/null || true)"
+  if [ "${#text}" -ge "${AGENTMUX_SEND_PASTE_CHARS:-512}" ] || [ "${confirm_cli%% *}" = codex ]; then
     # Three composer states: the placeholder (assembled, NOT submitted - press Enter),
     # the start of our own text still in it (still arriving - wait, do not count it as
     # clear), or neither (gone - submitted once that holds for three polls).
