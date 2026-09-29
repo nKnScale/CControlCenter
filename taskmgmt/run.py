@@ -1151,7 +1151,7 @@ def _submit_locked(args, run_id, index, by):
     files = [f for f in (args.files or "").split(",") if f.strip()]
     # A worker that did not say where it works hashes in the run's recorded tree, not
     # in whatever directory its pane happens to be in.
-    hashes = digest(args.repo or state.get("repo"), files)
+    hashes = digest(args.repo or state.get("repo") or os.environ.get("AGENTMUX_REPO"), files)
     directory = job_dir(run_id, index)
     directory.mkdir(parents=True, exist_ok=True)
     body = ((args.summary or "") + "\n\n## files\n"
@@ -1569,7 +1569,7 @@ def main(argv=None):
     start = sub.add_parser("start")
     start.add_argument("request")
     start.add_argument("--by", default=None)
-    start.add_argument("--repo", default=os.environ.get("AGENTMUX_REPO"))
+    start.add_argument("--repo", default=None)     # explicit only - see submit below
     start.set_defaults(func=cmd_start)
 
     set_repo = sub.add_parser("set-repo")
@@ -1593,7 +1593,10 @@ def main(argv=None):
     submit.add_argument("--by", default=os.environ.get("AGENTMUX_AGENT"))
     submit.add_argument("--files", default="")
     submit.add_argument("--summary", default="")
-    submit.add_argument("--repo", default=os.environ.get("AGENTMUX_REPO"))
+    # No env default here: the agentmux launcher exports AGENTMUX_REPO as the HARNESS
+    # checkout (so agentmux.sh can find taskmgmt/), and as a default it silently beat the
+    # run's recorded repo - TM-065's resubmit (46dc97/1) hashed every file as "missing".
+    submit.add_argument("--repo", default=None)
     submit.set_defaults(func=cmd_submit)
 
     verdict = sub.add_parser("verdict")

@@ -623,5 +623,32 @@ class TestOversizedSubmit(RunsBase):
         self.assertEqual(state["jobs"][f"{rid}/1"]["files"], [])
 
 
+
+class TestSubmitHashesInTheRunsRepo(TestRunInAnotherRepo):
+    """46dc97/1 (TM-065): the launcher exports AGENTMUX_REPO as the HARNESS checkout, and as
+    submit's --repo default it beat the run's recorded repo, so every file hashed 'missing'."""
+
+    def test_submit_ignores_the_launchers_agentmux_repo(self):
+        rid = "dd11ee"
+        self.run.run_dir(rid).mkdir(parents=True, exist_ok=True)
+        self.run.append_event(rid, {"event": "start", "by": "orchestrator", "detail": "x",
+                                    "repo": str(self.work), "base": self.base})
+        self.assign(rid, 1)
+        saved = {k: os.environ.get(k) for k in ("AGENTMUX_REPO", "AGENTMUX_TRUST_IDENTITY", "AGENTMUX_AGENT")}
+        os.environ.update(AGENTMUX_REPO=str(self.harness), AGENTMUX_TRUST_IDENTITY="1", AGENTMUX_AGENT="dev-a")
+        try:
+            code = self.run.main(["submit", f"{rid}/1", "--by", "dev-a", "--files", "one.txt",
+                                  "--summary", "s"])
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertEqual(code, 0)
+        submits = [e for e in self.run.load_events(rid) if e.get("event") == "submit"]
+        self.assertNotEqual(submits[-1]["hashes"]["one.txt"], "missing")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
