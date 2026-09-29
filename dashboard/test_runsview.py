@@ -513,5 +513,80 @@ class TestDiff(RunsBase):
         self.assertTrue(out["truncated"])
 
 
+
+class TestRunInAnotherRepo(RunsBase):
+    """A run whose work lives outside the harness's own tree.
+
+    Run 4bd8e4 (omen-integration-mock, 2026-09-29): the dashboard pinned the approval
+    against the harness checkout, every file came out "missing", and the operator was
+    approving an empty diff. The run's recorded repo must win.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.harness = Path(tempfile.mkdtemp(prefix="runsview-harness-"))
+        self.work = Path(tempfile.mkdtemp(prefix="runsview-work-"))
+        for d in (self.harness, self.work):
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        self.rv.REPO = self.harness
+        for cmd in (["init", "-q"], ["config", "user.email", "t@example.invalid"],
+                    ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", str(self.work)] + cmd, check=True,
+                           capture_output=True)
+        (self.work / "one.txt").write_text("before\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.work), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.work), "commit", "-q", "-m", "base"],
+                       check=True, capture_output=True)
+        self.base = subprocess.run(["git", "-C", str(self.work), "rev-parse", "HEAD"],
+                                   capture_output=True, text=True, check=True).stdout.strip()
+        (self.work / "one.txt").write_text("after\n", encoding="utf-8")
+
+    def started(self, rid, **extra):
+        self.run.run_dir(rid).mkdir(parents=True, exist_ok=True)
+        self.run.append_event(rid, dict({"event": "start", "by": "orchestrator",
+                                         "detail": "x"}, **extra))
+        self.assign(rid, 1)
+        self.submit(rid, 1, ("one.txt",))
+        self.verdict(rid, 1)
+        return rid
+
+    def test_the_approval_pins_real_bytes_in_the_runs_repo(self):
+        rid = self.started("bb11cc", repo=str(self.work), base=self.base)
+        self.rv.write_approval(rid, "operator", "")
+        pinned = self.rv.load_approval(rid)["files"]
+        self.assertNotEqual(pinned["one.txt"], "missing")
+        self.assertIsNone(self.run.approval_blocks_completion(rid))
+
+    def test_without_a_recorded_repo_the_pin_is_blind_and_refused(self):
+        # The matching negative: the same run with no repo pins "missing" and the
+        # gate says so rather than passing.
+        rid = self.started("bb22cc")
+        self.rv.write_approval(rid, "operator", "")
+        self.assertEqual(self.rv.load_approval(rid)["files"]["one.txt"], "missing")
+        self.assertIn("could not read", self.run.approval_blocks_completion(rid))
+
+    def test_editing_after_approval_is_still_caught_in_the_other_repo(self):
+        rid = self.started("bb33cc", repo=str(self.work), base=self.base)
+        self.rv.write_approval(rid, "operator", "")
+        (self.work / "one.txt").write_text("sneaky\n", encoding="utf-8")
+        self.assertIn("changed after", self.run.approval_blocks_completion(rid))
+
+    def test_the_review_diff_comes_from_the_runs_repo(self):
+        rid = self.started("bb44cc", repo=str(self.work), base=self.base)
+        out = self.rv.review_diff(rid)
+        self.assertIn("+after", out["diff"])
+        self.assertEqual(out["base"], self.base)
+
+    def test_set_repo_attaches_a_tree_but_does_not_launder_a_blind_approval(self):
+        rid = self.started("bb55cc")
+        self.rv.write_approval(rid, "operator", "")          # blind
+        self.run.append_event(rid, {"event": "repo", "by": "orchestrator",
+                                    "repo": str(self.work), "base": self.base})
+        self.assertIn("could not read", self.run.approval_blocks_completion(rid))
+        self.rv.write_approval(rid, "operator", "")          # approved again, sighted
+        self.assertIsNone(self.run.approval_blocks_completion(rid))
+        self.assertIn("+after", self.rv.review_diff(rid)["diff"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

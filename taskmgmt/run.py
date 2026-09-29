@@ -191,12 +191,18 @@ def fold(events):
     base = None
     origin = None
     pane = None
+    repo = None
     forced = False
     for event in events:
         kind = event.get("event")
+        if kind == "repo":
+            repo = event.get("repo") or repo
+            base = event.get("base") or base
+            continue
         if kind == "start":
             request = event.get("detail")
             base = event.get("base") or base
+            repo = event.get("repo") or repo
             origin = event.get("origin") or origin
             pane = event.get("pane") or pane
             continue
@@ -233,7 +239,41 @@ def fold(events):
             row["state"] = "escalated"
             row["detail"] = event.get("detail")
     return {"request": request, "base": base, "origin": origin, "pane": pane,
-            "jobs": jobs, "forced": forced}
+            "repo": repo, "jobs": jobs, "forced": forced}
+
+
+def run_repo(state, fallback=None):
+    """The tree this run's files live in.
+
+    A RUN CAN BE FOR ANOTHER REPO. The harness drives work in any checkout, but every
+    reader of a run - the approval pin, the drift check, the dashboard diff - used to
+    resolve its paths against the harness's own tree. For a run whose work lived
+    elsewhere, the approval pinned every file as "missing" and the operator was shown
+    an empty diff: run 4bd8e4 (omen-integration-mock) was approved that way on
+    2026-09-29, and only the blind-pin refusal in approval_blocks_completion caught it.
+    The repo recorded on the run wins over the caller's default, because it is the
+    one the worker's submission was actually hashed in.
+    """
+    return str(state.get("repo") or fallback or REPO_ROOT)
+
+
+def resolve_repo(path):
+    """An absolute git work tree, or ValueError. Recorded paths must not be relative:
+    the dashboard and the orchestrator run from different directories."""
+    if not path:
+        return None
+    root = Path(path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"--repo {path!r} is not a directory")
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                              stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as err:
+        raise ValueError(f"--repo {path!r}: git unavailable ({type(err).__name__})") from None
+    if proc.returncode != 0:
+        raise ValueError(f"--repo {path!r} is not inside a git work tree")
+    return str(Path(proc.stdout.strip()).resolve())
 
 
 def repo_head(repo=None):
@@ -336,7 +376,7 @@ def write_approval(run_id, by, note, decision="approved", repo=None):
                 "Approval is the gate after review, not instead of it.")
     record = {"version": APPROVAL_VERSION, "run": run_id, "decision": decision,
               "by": by, "at": now(), "note": (note or "")[:NOTE_MAX],
-              "files": digest(str(repo or REPO_ROOT), submitted_files(state))}
+              "files": digest(run_repo(state, repo), submitted_files(state))}
     handle, tmp = tempfile.mkstemp(dir=str(directory), prefix=".approval-")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
@@ -361,7 +401,7 @@ def approval_drift(run_id, repo=None):
     if not record or record.get("decision") != "approved":
         return None
     pinned = record.get("files") or {}
-    current = digest(str(repo or REPO_ROOT), sorted(pinned))
+    current = digest(run_repo(fold(load_events(run_id)), repo), sorted(pinned))
     # "missing" IS NOT A HASH, so it must never compare equal to one.
     #
     # digest() records the string "missing" when it cannot read a file. When the
@@ -408,6 +448,7 @@ def approval_blocks_completion(run_id, repo=None, agent=None):
                 + "\n  Approve the run once the changes are in, or record a new"
                   " decision.")
     drift = approval_drift(run_id, repo)
+    recorded = fold(load_events(run_id)).get("repo")
     if drift:
         # Two different failures wear the same word, and conflating them sends the
         # operator looking for an edit that never happened.
@@ -416,10 +457,14 @@ def approval_blocks_completion(run_id, repo=None, agent=None):
             return (f"the approval could not read {len(blind)} of the file(s) it "
                     f"covers: {', '.join(blind[:6])}"
                     + ("" if len(blind) <= 6 else f" (+{len(blind) - 6} more)")
-                    + f"\n  Looked under {repo or REPO_ROOT}. If the work is outside "
-                      "that tree, submit it with --repo pointing at the tree it\n  "
-                      "actually lives in, so the approval pins real bytes rather than "
-                      "the absence of them.")
+                    + (f"\n  The run's repo is now recorded ({recorded}), but this "
+                       "approval predates it.\n  Approve again in the CCC's Runs view "
+                       "so it pins the real bytes."
+                       if recorded else
+                       f"\n  Looked under {repo or REPO_ROOT}. If the work is outside "
+                       "that tree, record it with\n  `run.py set-repo "
+                       f"{run_id} <path> --base <start commit>` and approve again, so the\n  "
+                       "approval pins real bytes rather than the absence of them."))
         return (f"{len(drift)} file(s) changed after the operator approved this run: "
                 f"{', '.join(drift[:6])}"
                 + ("" if len(drift) <= 6 else f" (+{len(drift) - 6} more)")
@@ -871,6 +916,11 @@ def cmd_start(args):
     if not (args.request or "").strip():
         print("run: a run needs a request - say what it is for", file=sys.stderr)
         return 2
+    try:
+        repo = resolve_repo(args.repo)
+    except ValueError as err:
+        print(f"run: {err}", file=sys.stderr)
+        return 2
     for _ in range(8):
         run_id = secrets.token_hex(3)
         directory = run_dir(run_id)
@@ -885,7 +935,8 @@ def cmd_start(args):
         # the context that knows what the run was for. That session is the one that has
         # to look when the run stops at the operator gate.
         append_event(run_id, {"event": "start", "by": by,
-                              "base": repo_head(REPO_ROOT),
+                              "base": repo_head(repo or REPO_ROOT),
+                              **({"repo": repo} if repo else {}),
                               "via": coordination.orchestrator_pane(),
                               "origin": notify.origin_id(),
                               "pane": os.environ.get("TMUX_PANE") or None,
@@ -895,6 +946,49 @@ def cmd_start(args):
         return 0
     print("run: could not allocate a run id", file=sys.stderr)
     return 1
+
+
+def cmd_set_repo(args):
+    """Record the tree an existing run's work lives in (runs started before --repo).
+
+    It does not carry an approval across: one pinned against the wrong tree pinned
+    "missing", and approval_blocks_completion keeps refusing until the operator
+    approves again against real bytes. That is deliberate - they were shown an empty
+    diff the first time.
+    """
+    try:
+        by = coordination.orchestrator_identity("set-repo", args.by)
+    except coordination.IdentityError as err:
+        print(err, file=sys.stderr)
+        return 2
+    if not valid_run(args.run) or not run_dir(args.run).is_dir():
+        print(f"run: no such run {args.run}", file=sys.stderr)
+        return 2
+    if complete_path(args.run).exists():
+        print(f"run: {args.run} is already complete", file=sys.stderr)
+        return 2
+    try:
+        repo = resolve_repo(args.repo)
+    except ValueError as err:
+        print(f"run: {err}", file=sys.stderr)
+        return 2
+    # NOT repo_head(): by now the work is usually committed, and a base at today's HEAD
+    # would diff it away. The base is the commit the work started from, so it is said.
+    base = None
+    if args.base:
+        proc = subprocess.run(["git", "-C", repo, "rev-parse", "--verify",
+                               args.base + "^{commit}"], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            print(f"run: --base {args.base!r} is not a commit in {repo}", file=sys.stderr)
+            return 2
+        base = proc.stdout.strip()
+    append_event(args.run, {"event": "repo", "by": by, "repo": repo,
+                            **({"base": base} if base else {}), "detail": repo})
+    print(f"{args.run}: repo {repo}")
+    if load_approval(args.run):
+        print("  The existing approval was pinned against another tree; approve again.")
+    return 0
 
 
 def cmd_assign(args):
@@ -1021,7 +1115,9 @@ def _submit_locked(args, run_id, index, by):
         return 2
 
     files = [f for f in (args.files or "").split(",") if f.strip()]
-    hashes = digest(args.repo, files)
+    # A worker that did not say where it works hashes in the run's recorded tree, not
+    # in whatever directory its pane happens to be in.
+    hashes = digest(args.repo or state.get("repo"), files)
     directory = job_dir(run_id, index)
     directory.mkdir(parents=True, exist_ok=True)
     body = ((args.summary or "") + "\n\n## files\n"
@@ -1439,7 +1535,16 @@ def main(argv=None):
     start = sub.add_parser("start")
     start.add_argument("request")
     start.add_argument("--by", default=None)
+    start.add_argument("--repo", default=os.environ.get("AGENTMUX_REPO"))
     start.set_defaults(func=cmd_start)
+
+    set_repo = sub.add_parser("set-repo")
+    set_repo.add_argument("run")
+    set_repo.add_argument("repo")
+    set_repo.add_argument("--by", default=None)
+    set_repo.add_argument("--base", default=None,
+                          help="the commit the run's work started from, for the diff")
+    set_repo.set_defaults(func=cmd_set_repo)
 
     assign = sub.add_parser("assign")
     assign.add_argument("run")

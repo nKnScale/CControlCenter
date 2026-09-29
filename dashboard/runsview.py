@@ -110,6 +110,8 @@ def review_diff(run_id):
     if not runmod.run_dir(run_id).is_dir():
         raise ReviewError(f"no such run {run_id}")
     state = runmod.fold(runmod.load_events(run_id))
+    # The run's own tree when it recorded one - see run.run_repo.
+    repo = Path(runmod.run_repo(state, REPO))
     files = submitted_files(state)
     if not files:
         return {"files": [], "rejected": [], "diff": "", "base": state.get("base"),
@@ -123,7 +125,7 @@ def review_diff(run_id):
             rejected.append(name)         # never let a path become a git flag
             continue
         try:
-            (REPO / name).resolve().relative_to(REPO.resolve())
+            (repo / name).resolve().relative_to(repo.resolve())
         except (OSError, ValueError):
             rejected.append(name)
             continue
@@ -139,14 +141,14 @@ def review_diff(run_id):
     base = state.get("base")
     if base and not re.fullmatch(r"[0-9a-f]{40}", str(base)):
         base = None
-    if base and not _have_commit(base):
+    if base and not _have_commit(base, repo):
         base = None                      # rebased or garbage-collected since
     against = base or "HEAD"
     out, truncated = "", len(files) > DIFF_FILES
     if safe:
         try:
             proc = subprocess.run(
-                ["git", "-C", str(REPO), "diff", against, "--"] + safe,
+                ["git", "-C", str(repo), "diff", against, "--"] + safe,
                 stdin=subprocess.DEVNULL,
                 capture_output=True, text=True, timeout=25, errors="replace")
             out = proc.stdout or ""
@@ -162,8 +164,8 @@ def review_diff(run_id):
         # empty diff would have approved work they were never shown, which is the one
         # failure this whole gate exists to prevent. `--no-index` renders them as the
         # new files they are without touching the index.
-        for name in untracked(safe):
-            out += new_file_diff(name)
+        for name in untracked(safe, repo):
+            out += new_file_diff(name, repo)
     if len(out) > DIFF_MAX:
         out, truncated = out[:DIFF_MAX], True
     note = "" if base else ("This run predates the recorded base commit, so the diff "
@@ -173,13 +175,13 @@ def review_diff(run_id):
             "against": against, "truncated": truncated, "note": note}
 
 
-def untracked(names):
+def untracked(names, repo=None):
     """Of these paths, the ones git does not track. Asked in one call, not N."""
     if not names:
         return []
     try:
         proc = subprocess.run(
-            ["git", "-C", str(REPO), "ls-files", "--others", "--exclude-standard",
+            ["git", "-C", str(repo or REPO), "ls-files", "--others", "--exclude-standard",
              "--"] + list(names),
             stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=20, errors="replace")
@@ -192,11 +194,11 @@ def untracked(names):
     return [n for n in names if n in found]
 
 
-def new_file_diff(name):
+def new_file_diff(name, repo=None):
     """A new file rendered as a diff, without staging it."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(REPO), "diff", "--no-index", "--", os.devnull, name],
+            ["git", "-C", str(repo or REPO), "diff", "--no-index", "--", os.devnull, name],
             stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=20, errors="replace")
     except (OSError, subprocess.SubprocessError) as err:
@@ -209,9 +211,9 @@ def new_file_diff(name):
     return f"\n=== new file: {name} ===\n{body}"
 
 
-def _have_commit(sha):
+def _have_commit(sha, repo=None):
     try:
-        proc = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", sha + "^{commit}"],
+        proc = subprocess.run(["git", "-C", str(repo or REPO), "cat-file", "-e", sha + "^{commit}"],
                               stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=10)
         return proc.returncode == 0
