@@ -211,7 +211,7 @@ echo '--- the sweep only touches agents THIS home owns ---'
   tmux() { :; }
   tm() {
     case "$1" in
-      list-sessions) printf '%s 1 0\n%s 1 0\n' mine theirs ;;
+      list-sessions) printf '%s 1 1 0\n%s 1 1 0\n' mine theirs ;;   # name session_act window_act attached
       *) return 0 ;;
     esac
   }
@@ -230,6 +230,33 @@ echo '--- the sweep only touches agents THIS home owns ---'
     *"closing mine"*) ok "the owned one is still closed - the scope is not a blanket veto" ;;
     *) bad "the owned one is still closed" "$out" ;;
   esac
+  rm -rf "$SCOPE"
+  printf '%s %s\n' "$passed" "$failed" > "$FDPASS"
+)
+read -r passed failed < "$FDPASS"
+
+echo '--- output counts as use: session_activity alone is frozen at spawn ---'
+# THE BUG: tmux moves session_activity only on client input or attach, never on pane
+# output or send-keys, so a detached agent read as idle since the minute it was spawned.
+# 2026-09-29: the whole tm-037 team was closed mid-work at exactly spawn+60m, and a
+# reviewer after it. window_activity moves with output; the later of the two counts.
+(
+  SCOPE="$(mktemp -d)"
+  ROOT="$SCOPE"; RUNDIR="$SCOPE/run"; mkdir -p "$RUNDIR"
+  : > "$RUNDIR/busy.cli"; : > "$RUNDIR/quiet.cli"
+  now="$(date +%s)"
+  tmux() { :; }
+  tm() {
+    case "$1" in
+      # busy: spawned in 1970, printed just now. quiet: nothing since 1970.
+      list-sessions) printf 'busy 1 %s 0\nquiet 1 1 0\n' "$now" ;;
+      *) return 0 ;;
+    esac
+  }
+  KILLED="$SCOPE/killed"; : > "$KILLED"
+  cmd_kill() { printf '%s\n' "$1" >> "$KILLED"; }
+  cmd_idle --minutes 60 >/dev/null 2>&1
+  check "a detached agent that is producing output is not closed" "quiet" "$(tr -d '\r' < "$KILLED")"
   rm -rf "$SCOPE"
   printf '%s %s\n' "$passed" "$failed" > "$FDPASS"
 )

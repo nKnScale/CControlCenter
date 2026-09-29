@@ -2522,8 +2522,13 @@ cmd_kill() {
   # The marker is claimed BEFORE the two calls, not after, so a crash between them
   # cannot produce a duplicate on the next reaper pass (#16).
   local bound; bound="$(cat "$RUNDIR/$target.task" 2>/dev/null || true)"
+  # A COMMENT, NOT A TRANSITION. Ending an agent is not finishing its card: reviewers
+  # are bound to the card they review, the idle watchdog kills on a timer, and a kill
+  # is often the operator clearing a pane. Measured 2026-09-29: the idle sweep closed
+  # reviewer rev-042 and this line moved DTS-245 to Done an hour after its review had
+  # FAILED. Done is decided by `run complete` or an explicit `task done`.
   if [ -n "$bound" ] && task_cli >/dev/null && claim_reported "$target" killed-by-cli; then
-    task_try done "$bound" --from-log "$target"
+    task_try comment "$bound" --from-log "$target"
     task_try report "$target" --title "agentmux run - $target - $bound"
   fi
 
@@ -2589,8 +2594,8 @@ EOF
 # up for days is how a `dev` pane sits at 3.4 hours of zero activity with an
 # unrestricted codex behind it, which is what prompted this.
 #
-# WHAT COUNTS AS "NO USE": tmux's own `session_activity`, which is the last time the
-# pane produced output or received input. That is the honest signal - it moves when
+# WHAT COUNTS AS "NO USE": the later of tmux's `session_activity` (client input) and
+# `window_activity` (pane output) - see cmd_idle for why session_activity alone is wrong. That is the honest signal - it moves when
 # the agent is thinking out loud, when it prints a result, and when anyone types at
 # it. It is NOT wall-clock uptime: a busy agent that has been running for six hours
 # is in use, and a fresh one that has done nothing for an hour is not.
@@ -2640,7 +2645,14 @@ cmd_idle() {
 
   local listing
   # No sessions at all is not a failure, it is the normal quiet state.
-  listing="$(tm list-sessions -F '#{session_name} #{session_activity} #{session_attached}' 2>/dev/null)" \
+  # session_activity alone is NOT activity: tmux moves it only on client input or
+  # attach, never on pane output or send-keys, so for a detached agent it is frozen at
+  # spawn time and "idle" silently meant "minutes since spawn". Measured 2026-09-29:
+  # a four-agent team (tm-037-*) was closed mid-work exactly 60 minutes after each was
+  # spawned, worker3 in the middle of writing a file. window_activity does move with
+  # output, so the later of the two is the real last use.
+  listing="$(tm list-sessions -F '#{session_name} #{session_activity} #{window_activity} #{session_attached}' 2>/dev/null \
+    | awk '{ a = ($3 ~ /^[0-9]+$/ && $3 > $2) ? $3 : $2; print $1, a, $4 }')" \
     || return 0
   [ -n "$listing" ] || return 0
 
@@ -2796,15 +2808,15 @@ cmd_reap() {
       continue
     fi
 
-    # Same close-out as `kill`, for the same reason: an orphan is a dead agent, and
-    # its Jira issue should not stay open because the tmux server went away rather
-    # than the operator typing `kill`. Best-effort - task_try swallows failures.
+    # Same close-out as `kill`: the dead agent's log goes onto its Jira issue so the
+    # record survives the pane. Best-effort - task_try swallows failures.
     bound="$(cat "$RUNDIR/$name.task" 2>/dev/null || true)"
     # The identity of the dead agent, captured BEFORE the slow part. See below.
     local stamp; stamp="$(cat "$RUNDIR/$name.started" 2>/dev/null || true)"
 
+    # Comment only - see cmd_kill: a dead agent is not a finished card.
     if [ -n "$bound" ] && task_cli >/dev/null && claim_reported "$name" reaped-by-cli; then
-      task_try done "$bound" --from-log "$name"
+      task_try comment "$bound" --from-log "$name"
       task_try report "$name" --title "agentmux run - $name - $bound"
     fi
 
