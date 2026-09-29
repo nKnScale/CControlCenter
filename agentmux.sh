@@ -1457,18 +1457,28 @@ cmd_send() {
     # Three composer states: the placeholder (assembled, NOT submitted - press Enter),
     # the start of our own text still in it (still arriving - wait, do not count it as
     # clear), or neither (gone - submitted once that holds for three polls).
-    local polls=0 extra=0 clear=0 composer lead="${text:0:40}"
+    local polls=0 extra=0 clear=0 stuck=0 composer lead="${text:0:40}"
     local budget="${AGENTMUX_SEND_CONFIRM_POLLS:-12}" every="${AGENTMUX_SEND_CONFIRM_INTERVAL:-0.4}"
     while [ "$polls" -lt "$budget" ]; do
       sleep "$every"; polls=$((polls + 1))
       composer="$(tm capture-pane -p -t "$pane" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -6)"
       if printf '%s' "$composer" | grep -qiE '\[pasted content|\[[0-9]+ lines pasted'; then
-        clear=0
+        clear=0; stuck=0
         [ "$extra" -lt 3 ] || break
         tm send-keys -t "$pane" Enter
         extra=$((extra + 1))
       elif printf '%s' "$composer" | grep -qF -- "$lead"; then
-        clear=0
+        # STILL IN THE COMPOSER. Briefly that means codex is still assembling the paste,
+        # but a composer that holds the whole text for three polls has it all and simply
+        # dropped the Enter - the courier left three messages typed and unsent in
+        # tm-037-worker2 on 2026-09-29, because this branch only ever waited. Press again,
+        # inside the same 3-extra-Enter bound as the placeholder case.
+        clear=0; stuck=$((stuck + 1))
+        if [ "$stuck" -ge 3 ]; then
+          [ "$extra" -lt 3 ] || break
+          tm send-keys -t "$pane" Enter
+          extra=$((extra + 1)); stuck=0
+        fi
       else
         clear=$((clear + 1))
         [ "$clear" -ge 3 ] && break

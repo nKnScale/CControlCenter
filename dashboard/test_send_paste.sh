@@ -37,14 +37,20 @@ elif cmd == 'send-keys':
         s['pasted_at'] = now; s['submitted'] = False; s['text'] = keys[-1] if keys else ''
     elif keys and keys[-1] == 'Enter':
         s['enters'] += 1
-        # an Enter while the paste is still assembling is swallowed
+        swallow = int(os.environ.get('FAKE_SWALLOW', '0'))
+        # an Enter while the paste is still assembling is swallowed, and so are the
+        # first FAKE_SWALLOW Enters after it (a composer that drops the keypress)
         if s['pasted_at'] is not None and now - s['pasted_at'] >= assembly:
-            s['submitted'] = True
+            s['late'] = s.get('late', 0) + 1
+            if s['late'] > swallow:
+                s['submitted'] = True
     save()
 elif cmd == 'capture-pane':
     lines = [s.get('scrollback', '')]
     if s['pasted_at'] is not None and not s['submitted'] and now - s['pasted_at'] < assembly:
         lines.append('› ' + s.get('text', '')[:60])          # still arriving
+    elif s['pasted_at'] is not None and not s['submitted'] and os.environ.get('FAKE_NO_PLACEHOLDER'):
+        lines.append('› ' + s.get('text', '')[:60])          # typed in full, sitting there
     elif s['pasted_at'] is not None and not s['submitted']:
         lines.append('› [Pasted Content 4506 chars]')
     else:
@@ -99,7 +105,16 @@ elif cmd == 'capture-pane':
     assert pane()['enters'] <= 4, pane()
     check('a composer that never submits is not pressed forever')
 
-    # 5. short text: one Enter, no confirm loop
+    # 5. THE COURIER FAULT (2026-09-29, tm-037-worker2): the text is fully in the composer,
+    #    no placeholder, and the first Enter was dropped. The loop read "text still visible"
+    #    as "still assembling" and waited out its budget without pressing Enter again.
+    reset(); r = send(long, FAKE_ASSEMBLY='0', FAKE_NO_PLACEHOLDER='1', FAKE_SWALLOW='1')
+    assert r.returncode == 0, r.stderr
+    assert pane()['submitted'], ('typed-but-unsubmitted message left in the composer', pane())
+    assert pane()['enters'] <= 4, pane()
+    check('a composer that dropped the Enter is pressed again')
+
+    # 6. short text: one Enter, no confirm loop
     reset(); t0 = time.time(); r = send('short message', FAKE_ASSEMBLY='0')
     assert r.returncode == 0 and pane()['enters'] == 1 and time.time() - t0 < 5, pane()
     check('short text is sent once, without polling')
