@@ -261,7 +261,7 @@ claude_keychain_note() {
 }
 
 claude_config_dir() {
-  local name="$1" posture="$2" tools="$3" deny_tools="$4"
+  local name="$1" posture="$2" tools="$3" deny_tools="$4" cwd="${5:-$PWD}"
   local d="$ROOT/claude-config/$name" src entry base tmp
   src="$(effective_claude_dir)"
   [ ! -L "$ROOT/claude-config" ] && [ ! -L "$d" ] || return 1
@@ -272,7 +272,7 @@ claude_config_dir() {
       [ -e "$entry" ] || continue
       base="${entry##*/}"
       case "$base" in
-        settings.json|settings.local.json|sessions|history.jsonl|backups|projects|todos|statsig|shell-snapshots|ide) continue ;;
+        settings.json|settings.local.json|.claude.json|sessions|history.jsonl|backups|projects|todos|statsig|shell-snapshots|ide) continue ;;
       esac
       [ -e "$d/$base" ] || ln -s "$entry" "$d/$base" 2>/dev/null
     done
@@ -322,7 +322,45 @@ if posture == 'read-only':
     required.update(['Write', 'Edit'])
 assert required.issubset(p['deny'])
 PYPROVE
+  claude_seed_state "$d" "$cwd" || return 1
   printf '%s' "$d"
+}
+
+# A spawned agent's first launch must land on a prompt, not a wizard.
+#
+# Claude keeps its onboarding and per-folder trust state in .claude.json INSIDE
+# CLAUDE_CONFIG_DIR. The mirror above links the contents of ~/.claude, but the
+# operator's own state lives in ~/.claude.json beside it, so every new agent dir
+# had none: claude opened on the theme picker (then the trust prompt), and a
+# dispatched brief was typed into that dialog instead of the session.
+#
+# Seed only what first-run asks about - onboarding done, the operator's theme,
+# and trust for this agent's cwd. Nothing else is copied from the operator's file:
+# not oauthAccount, not mcpServers, not userID. The dir is new per agent (GC prunes
+# a dead agent's), so the file is written fresh. A symlinked .claude.json is
+# refused, since writing through it would edit someone else's state.
+claude_seed_state() {
+  local d="$1" cwd="$2"
+  [ ! -L "$d/.claude.json" ] || return 1
+  python3 - "$d/.claude.json" "$HOME/.claude.json" "$cwd" <<'PYSEED'
+import json, os, pathlib, sys
+dst, operator, cwd = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+state = {}
+try:
+    source = json.loads(operator.read_text()) if operator.is_file() else {}
+except ValueError:
+    source = {}
+state['hasCompletedOnboarding'] = True
+state['theme'] = source.get('theme') or 'dark'
+if source.get('lastOnboardingVersion'):
+    state['lastOnboardingVersion'] = source['lastOnboardingVersion']
+state['projects'] = {path: {'hasTrustDialogAccepted': True, 'hasCompletedProjectOnboarding': True}
+                     for path in {cwd, os.path.realpath(cwd)}}
+tmp = dst.with_name(dst.name + '.tmp')
+tmp.write_text(json.dumps(state, indent=2) + '\n')
+os.chmod(tmp, 0o600)
+tmp.replace(dst)
+PYSEED
 }
 
 # Path to the scripted Atlassian CLI, or empty if task management is not set up.
@@ -824,6 +862,15 @@ except Exception:
   case "$cli" in
     codex)
       launch="codex${auth_flags:+ $auth_flags}${model:+ -m $quoted_model}"
+      # A spawned codex must start at a prompt. Two startup modals otherwise eat the
+      # brief: the "Update available" menu and the per-folder "Trust this folder?"
+      # prompt (every fresh worktree or repo triggers it). Both are per-launch -c
+      # overrides - config.toml is never written, for the reason codex_yolo_profile
+      # gives - and the trust entry names only this agent's cwd.
+      local codex_trust
+      codex_trust="$(python3 -c 'import json,os,sys; p=os.path.realpath(sys.argv[1]); print("projects={%s={trust_level=\"trusted\"}}" % json.dumps(p))' "$cwd")" || die "cannot build codex trust override"
+      printf -v codex_trust '%q' "$codex_trust"
+      launch="$launch -c check_for_update_on_startup=false -c $codex_trust"
       if [ "$bypass" = 1 ]; then
         launch="$launch --dangerously-bypass-approvals-and-sandbox"
       else
@@ -831,7 +878,7 @@ except Exception:
       fi
       ;;
     claude)
-      ccd="$(claude_config_dir "$name" "$posture" "$tools" "$deny_tools")" || die "could not prove claude posture '$posture'"
+      ccd="$(claude_config_dir "$name" "$posture" "$tools" "$deny_tools" "$cwd")" || die "could not prove claude posture '$posture'"
       printf -v quoted_path '%q' "$ccd"
       env_prefix="$env_prefix export CLAUDE_CONFIG_DIR=$quoted_path;"
       claude_keychain_note "$ccd"

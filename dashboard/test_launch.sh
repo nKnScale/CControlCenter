@@ -134,5 +134,41 @@ case "$last" in */settings.json) printf '%s\\n' '{"permissions":{"defaultMode":"
     (src/'settings.json').write_text('{invalid')
     run('broken-source', '--cli', 'claude', '--posture', 'unrestricted', success=False, error='could not prove')
     check('published-settings corruption and broken source fail the spawn without permissive fallback')
+
+    # A new agent must open at a prompt: onboarding done, theme set, its cwd trusted -
+    # and nothing else copied out of the operator's ~/.claude.json.
+    (src/'settings.json').write_text('{}')
+    operator_home = root / 'operator-home'; operator_home.mkdir()
+    (operator_home / '.claude.json').write_text(json.dumps({
+        'hasCompletedOnboarding': True, 'theme': 'light', 'lastOnboardingVersion': '9.9.9',
+        'oauthAccount': {'emailAddress': 'operator@example.com'}, 'userID': 'operator-id',
+        'mcpServers': {'secret': {'command': 'x'}}}))
+    run('seeded', '--cli', 'claude', '--posture', 'read-only', extra={'HOME': str(operator_home)})
+    seeded = json.loads((root/'home'/'claude-config'/'seeded'/'.claude.json').read_text())
+    assert seeded['hasCompletedOnboarding'] is True and seeded['theme'] == 'light', seeded
+    assert seeded['projects'][os.path.realpath(root)]['hasTrustDialogAccepted'] is True, seeded
+    for leaked in ('oauthAccount', 'userID', 'mcpServers'):
+        assert leaked not in seeded, leaked
+    assert oct((root/'home'/'claude-config'/'seeded'/'.claude.json').stat().st_mode & 0o777) == '0o600'
+    # no operator theme -> a fixed default, still past the picker
+    (operator_home / '.claude.json').write_text(json.dumps({'hasCompletedOnboarding': True}))
+    run('defaulted', '--cli', 'claude', '--posture', 'read-only', extra={'HOME': str(operator_home)})
+    assert json.loads((root/'home'/'claude-config'/'defaulted'/'.claude.json').read_text())['theme'] == 'dark'
+    # a .claude.json inside the source config dir is never linked into the mirror,
+    # so seeding can never write through to the operator's file
+    (src/'.claude.json').write_text(json.dumps({'oauthAccount': {'emailAddress': 'operator@example.com'}}))
+    run('unlinked', '--cli', 'claude', '--posture', 'read-only', extra={'HOME': str(operator_home)})
+    agent_state = root/'home'/'claude-config'/'unlinked'/'.claude.json'
+    assert not agent_state.is_symlink() and 'oauthAccount' not in json.loads(agent_state.read_text())
+    assert json.loads((src/'.claude.json').read_text()) == {'oauthAccount': {'emailAddress': 'operator@example.com'}}
+    (src/'.claude.json').unlink()
+    check('claude agents start past onboarding and trust, copy no operator identity, never link operator state')
+
+    codex = bindir / 'codex'; codex.write_text('#!/bin/sh\nexit 0\n'); codex.chmod(0o755)
+    run('codexlaunch', '--cli', 'codex', '--posture', 'read-only')
+    launch = (state/'codexlaunch').read_text()
+    assert 'check_for_update_on_startup=false' in launch, launch
+    assert os.path.realpath(root) in launch and 'trust_level' in launch, launch
+    check('codex agents skip the update prompt and trust only their own cwd, per launch')
     print(f'passed {counter}, failed 0')
 PY

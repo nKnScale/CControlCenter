@@ -338,7 +338,7 @@ run test_mqtt.py  python3 dashboard/test_mqtt.py
 # The IIOT field services. Self-contained: its own HTTP server on an ephemeral port
 # and its own throwaway AGENTMUX_HOME, so it neither needs nor disturbs the shared
 # server this suite brought up.
-run test_field_panels.py timeout 300 python3 dashboard/test_field_panels.py
+run test_field_panels.py "${TIMEOUT[@]}" 300 python3 dashboard/test_field_panels.py
 # The browser suite. Brings up its own dashboard and its own stub broker on
 # ephemeral ports, so it needs neither the shared server this suite started nor the
 # 8787 lock. It SKIPS, loudly, if no Playwright installation can be found - see the

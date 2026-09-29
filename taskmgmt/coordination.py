@@ -1051,6 +1051,10 @@ def cmd_task_new(args):
         fields["labels"] = args.label
     if args.human:
         fields["human"] = True
+    if args.parent:
+        fields["parent"] = args.parent
+    if args.jira:
+        fields["jira_key"] = args.jira
     row = board_call("POST", "board/create", fields)
     if row is None:
         return 1
@@ -1124,6 +1128,10 @@ def cmd_task_edit(args):
         patch["type"] = args.type
     if args.estimate is not None:
         patch["estimate"] = args.estimate
+    if args.parent:
+        patch["parent"] = args.parent
+    if args.jira:
+        patch["jira_key"] = args.jira
     if not patch:
         print("coordination: nothing to change", file=sys.stderr)
         return 2
@@ -1269,7 +1277,8 @@ def cmd_task_next(args):
 def cmd_epic_new(args):
     row = board_call("POST", "board/create",
                      {"kind": "epic", "title": args.title, "body": args.body or "",
-                      "actor": args.agent})
+                      "actor": args.agent,
+                      **({"jira_key": args.jira} if args.jira else {})})
     if row is None:
         return 1
     print(f"{row['id']} created: {row.get('title', '')[:60]}")
@@ -1592,6 +1601,8 @@ def main(argv=None):
     new.add_argument("--label", action="append", default=[])
     new.add_argument("--human", action="store_true",
                      help="file it with the human veto already set")
+    new.add_argument("--parent", default=None, help="TM-014: the story this card belongs to")
+    new.add_argument("--jira", default=None, help="DTS-12: the mirrored Jira issue key")
 
     add = board_verb("task-add", cmd_task_add)
     add.add_argument("epic", type=int)
@@ -1609,6 +1620,8 @@ def main(argv=None):
     edit.add_argument("--priority", default=None, choices=PRIORITIES)
     edit.add_argument("--type", default=None, choices=ISSUE_TYPES)
     edit.add_argument("--estimate", type=float, default=None)
+    edit.add_argument("--parent", default=None, help="TM-014: the story this card belongs to")
+    edit.add_argument("--jira", default=None, help="DTS-12: the mirrored Jira issue key")
 
     criterion = board_verb("task-ac", cmd_task_ac)
     criterion.add_argument("id")
@@ -1662,6 +1675,7 @@ def main(argv=None):
     epic_new.add_argument("--body", default=None)
     epic_new.add_argument("--active", action="store_true",
                           help="make it the epic new tasks file into")
+    epic_new.add_argument("--jira", default=None, help="DTS-10: the mirrored Jira epic key")
 
     epic_status = board_verb("epic-status", cmd_epic_status)
     epic_status.add_argument("id")
