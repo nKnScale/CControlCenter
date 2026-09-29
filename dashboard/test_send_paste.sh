@@ -49,6 +49,8 @@ elif cmd == 'capture-pane':
     lines = [s.get('scrollback', '')]
     if s['pasted_at'] is not None and not s['submitted'] and now - s['pasted_at'] < assembly:
         lines.append('› ' + s.get('text', '')[:60])          # still arriving
+    elif s['pasted_at'] is not None and not s['submitted'] and os.environ.get('FAKE_SHOW_TAIL'):
+        lines.append('  ' + s.get('text', '')[-60:])         # a wrapped composer shows the END
     elif s['pasted_at'] is not None and not s['submitted'] and os.environ.get('FAKE_NO_PLACEHOLDER'):
         lines.append('› ' + s.get('text', '')[:60])          # typed in full, sitting there
     elif s['pasted_at'] is not None and not s['submitted']:
@@ -130,5 +132,13 @@ elif cmd == 'capture-pane':
     assert pane()['enters'] <= 4, pane()
     check('a short message to codex is confirmed too')
     (rundir / 'worker.cli').unlink()
+    # 8. THE rev-041 FAULT: a long brief wraps, the composer's bottom lines show only its
+    #    END, the lead check never matched, so "not visible" read as "submitted".
+    reset(); r = send(long + ' then run.py verdict 94864d/1.', FAKE_ASSEMBLY='0',
+                      FAKE_SHOW_TAIL='1', FAKE_SWALLOW='1')
+    assert r.returncode == 0, r.stderr
+    assert pane()['submitted'], ('wrapped long message left unsent', pane())
+    assert pane()['enters'] <= 4, pane()
+    check('a wrapped message showing only its tail is still confirmed')
     print(f'passed {counter}, failed 0')
 PY

@@ -1462,17 +1462,24 @@ cmd_send() {
     # Three composer states: the placeholder (assembled, NOT submitted - press Enter),
     # the start of our own text still in it (still arriving - wait, do not count it as
     # clear), or neither (gone - submitted once that holds for three polls).
-    local polls=0 extra=0 clear=0 stuck=0 composer lead="${text:0:40}"
+    # BOTH ENDS OF THE TEXT. A long message wraps, and the composer's bottom lines show
+    # its END, not its start - so checking only the lead read an unsent 1200-char brief
+    # to rev-041 (2026-09-29) as "cleared" and walked away. The tail is the last 40
+    # characters of the final line, which is what a wrapped composer actually shows.
+    local lastline="${text##*$'\n'}"
+    local polls=0 extra=0 clear=0 stuck=0 composer lead="${text:0:40}" tail="${lastline: -40}"
     local budget="${AGENTMUX_SEND_CONFIRM_POLLS:-12}" every="${AGENTMUX_SEND_CONFIRM_INTERVAL:-0.4}"
     while [ "$polls" -lt "$budget" ]; do
       sleep "$every"; polls=$((polls + 1))
-      composer="$(tm capture-pane -p -t "$pane" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -6)"
+      # -J joins wrapped lines, so a long message reads as one line, not as fragments.
+      composer="$(tm capture-pane -p -J -t "$pane" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -6)"
       if printf '%s' "$composer" | grep -qiE '\[pasted content|\[[0-9]+ lines pasted'; then
         clear=0; stuck=0
         [ "$extra" -lt 3 ] || break
         tm send-keys -t "$pane" Enter
         extra=$((extra + 1))
-      elif printf '%s' "$composer" | grep -qF -- "$lead"; then
+      elif printf '%s' "$composer" | grep -qF -- "$lead" \
+          || { [ "${#tail}" -ge 12 ] && printf '%s' "$composer" | grep -qF -- "$tail"; }; then
         # STILL IN THE COMPOSER. Briefly that means codex is still assembling the paste,
         # but a composer that holds the whole text for three polls has it all and simply
         # dropped the Enter - the courier left three messages typed and unsent in
