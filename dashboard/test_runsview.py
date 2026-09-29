@@ -588,5 +588,40 @@ class TestRunInAnotherRepo(RunsBase):
         self.assertIn("+after", self.rv.review_diff(rid)["diff"])
 
 
+
+class TestOversizedSubmit(RunsBase):
+    """Run 151762 (TM-040): a 20-file submit spilled to a sidecar, nothing read it back,
+    and the operator approved an empty diff that pinned no files."""
+
+    def big_submit(self, rid, files):
+        self.run.append_event(rid, {"event": "submit", "job": f"{rid}/1", "by": "dev-a",
+                                    "files": files,
+                                    "hashes": {f: "0" * 16 for f in files},
+                                    "detail": "x" * 1500})
+
+    def test_a_spilled_submit_still_names_its_files(self):
+        rid = self.make_run("cc11dd")
+        self.assign(rid, 1)
+        files = [f"src/pkg/module_{i:03d}_with_a_long_descriptive_name.py" for i in range(60)]
+        self.big_submit(rid, files)
+        raw = self.run.events_path(rid).read_text(encoding="utf-8")
+        self.assertIn('"overflow"', raw, "fixture must actually overflow")
+        state = self.run.fold(self.run.load_events(rid))
+        self.assertEqual(state["jobs"][f"{rid}/1"]["files"], files)
+        self.assertEqual(self.run.submitted_files(state), files)
+
+    def test_a_sidecar_that_disagrees_with_the_ledger_is_ignored(self):
+        rid = self.make_run("cc22dd")
+        self.assign(rid, 1)
+        files = [f"src/pkg/module_{i:03d}_with_a_long_descriptive_name.py" for i in range(60)]
+        self.big_submit(rid, files)
+        sidecar = next(self.run.run_dir(rid).glob("event-overflow-*.json"))
+        forged = json.loads(sidecar.read_text())
+        forged["by"] = "someone-else"
+        sidecar.write_text(json.dumps(forged))
+        state = self.run.fold(self.run.load_events(rid))
+        self.assertEqual(state["jobs"][f"{rid}/1"]["files"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

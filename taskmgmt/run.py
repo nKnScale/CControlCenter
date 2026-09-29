@@ -178,10 +178,44 @@ def load_events(run_id):
             except ValueError:
                 continue                 # a torn final line, same as courier does
             if isinstance(value, dict):
-                out.append(value)
+                out.append(_rehydrate(path.parent, value))
     except OSError:
         pass
     return out
+
+
+OVERFLOW_NAME = re.compile(r"event-overflow-[0-9a-f]{8}\.json")
+
+
+def _rehydrate(directory, stub):
+    """The full record behind an oversized event, or the stub unchanged.
+
+    append_event spills an oversized record to a sidecar and leaves a stub, but for a
+    long time nothing read the sidecar back. A submit naming 20 files became a submit
+    naming none: fold() saw no files, the dashboard showed the operator "no job in this
+    run named any files" instead of a diff, and the approval pinned nothing. Measured
+    on run 151762 (TM-040, 2026-09-29), which was approved and completed that way.
+
+    THE LEDGER STAYS AUTHORITATIVE. The sidecar is a plain file beside it, so it is
+    only believed when it agrees with the stub on what happened (event, job, by);
+    otherwise the stub stands and the gaps fail closed rather than open.
+    """
+    name = stub.get("overflow")
+    if not (stub.get("truncated") and isinstance(name, str) and OVERFLOW_NAME.fullmatch(name)):
+        return stub
+    try:
+        full = json.loads((directory / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return stub
+    if not isinstance(full, dict):
+        return stub
+    if any(full.get(k) != stub.get(k) for k in ("event", "job", "by")):
+        return stub
+    merged = dict(full)
+    merged.update({k: v for k, v in stub.items() if k in ("at", "run", "event", "job", "by")})
+    merged["truncated"] = True
+    merged["overflow"] = name
+    return merged
 
 
 def fold(events):
