@@ -2,6 +2,7 @@
 """Roster contract through an isolated store and port-0 HTTP server."""
 import json
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -278,6 +279,52 @@ class TeamsHTTP(unittest.TestCase):
                          ["dashboard"])
         self.assertEqual(self.call("hire", {"id": self.key, "name": "lead"})[0], 409)
         spawn.assert_called_once()
+
+    def _git_tree(self, name):
+        tree = Path(tempfile.mkdtemp(prefix="card-repo-", dir=BASE)) / name
+        (tree / ".git").mkdir(parents=True)
+        return tree
+
+    def test_hire_starts_the_member_in_the_cards_repo(self):
+        """A card's team works where the card says - not always in the harness repo.
+
+        Until this existed every hired member was spawned with --cwd set to the
+        harness checkout, so a team for any other project edited the wrong tree.
+        The path comes from the card (validated on write), never from the request.
+        """
+        spawn = self.prepare_hire()
+        tree = self._git_tree("omen-integration-mock")
+        with ccstore.connection() as db:
+            ccboard.update(db, self.key, {"repo": str(tree)}, actor="lead")
+        status, result = self.call("hire", {"id": self.key, "name": "lead", "cwd": "/evil"})
+        self.assertEqual(status, 200, result)
+        args = spawn.call_args.args
+        self.assertEqual(args[args.index("--cwd") + 1], os.path.realpath(tree))
+        self.assertNotIn("/evil", args)
+
+    def test_hire_refuses_a_card_repo_that_has_gone(self):
+        spawn = self.prepare_hire()
+        tree = self._git_tree("gone")
+        with ccstore.connection() as db:
+            ccboard.update(db, self.key, {"repo": str(tree)}, actor="lead")
+        shutil.rmtree(tree)
+        status, result = self.call("hire", {"id": self.key, "name": "lead"})
+        self.assertEqual(status, 409, result)
+        spawn.assert_not_called()
+
+    def test_card_repo_is_bounded_to_a_git_work_tree(self):
+        plain = Path(tempfile.mkdtemp(prefix="not-git-", dir=BASE))
+        tree = self._git_tree("ok")
+        for bad in ("relative/path", str(BASE / "missing"), str(plain),
+                    os.path.sep, os.path.expanduser("~")):
+            with self.subTest(bad=bad), self.assertRaises(ccboard.Invalid):
+                ccboard.repo_field(bad)
+        self.assertIsNone(ccboard.repo_field(""))
+        self.assertIsNone(ccboard.repo_field(None))
+        link = BASE / "repo-link"
+        link.symlink_to(tree)
+        self.addCleanup(link.unlink)
+        self.assertEqual(ccboard.repo_field(str(link)), os.path.realpath(tree))
 
     def test_team_require_approval_off_actually_turns_approval_off(self):
         """A setting that was wired to nothing.

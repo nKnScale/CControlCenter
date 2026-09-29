@@ -1132,6 +1132,8 @@ def cmd_task_edit(args):
         patch["parent"] = args.parent
     if args.jira:
         patch["jira_key"] = args.jira
+    if args.repo is not None:
+        patch["repo"] = args.repo
     if not patch:
         print("coordination: nothing to change", file=sys.stderr)
         return 2
@@ -1622,6 +1624,8 @@ def main(argv=None):
     edit.add_argument("--estimate", type=float, default=None)
     edit.add_argument("--parent", default=None, help="TM-014: the story this card belongs to")
     edit.add_argument("--jira", default=None, help="DTS-12: the mirrored Jira issue key")
+    edit.add_argument("--repo", default=None,
+                      help="git work tree this card's team works in; '' clears it")
 
     criterion = board_verb("task-ac", cmd_task_ac)
     criterion.add_argument("id")

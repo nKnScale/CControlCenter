@@ -284,7 +284,7 @@ TASK_COLUMNS = {
     "session": "TEXT", "branch": "TEXT", "worktree": "TEXT",
     "blocked_reason": "TEXT", "parked_reason": "TEXT", "triaged_by": "TEXT",
     "goal_doc": "TEXT", "sprint_key": "TEXT", "parent_key": "TEXT",
-    "capability_key": "TEXT", "closed_at": "TEXT",
+    "capability_key": "TEXT", "closed_at": "TEXT", "repo": "TEXT",
 }
 
 # The rows already on the board were written against the old vocabulary. Mapping
@@ -458,6 +458,33 @@ def text(value, name, maximum=MAX_TEXT, required=False, pattern=None, choices=No
     if choices is not None and value not in choices:
         raise Invalid(name + " must be one of: " + ", ".join(choices))
     return value
+
+
+def repo_field(value, name="repo"):
+    """The repository a card's team works in, or None for the harness repo.
+
+    hire() ignores any cwd sent over the wire - port 8787 is unauthenticated - so a
+    card that needs its team somewhere else carries it here instead, and this is the
+    one place that decides what may be named. Any board writer can set it, agents
+    included, so it is bounded to what a team can legitimately work in: an existing
+    git work tree, resolved (so a symlink cannot point it somewhere else later), and
+    never the filesystem root or the home directory itself. hire() calls this again
+    at spawn time, because a directory valid when it was written may be gone since.
+    """
+    value = text(value, name, MAX_REF)
+    if not value:
+        return None
+    path = os.path.expanduser(value)
+    if not os.path.isabs(path):
+        raise Invalid(name + " must be an absolute path")
+    real = os.path.realpath(path)
+    if not os.path.isdir(real):
+        raise Invalid(name + " is not an existing directory")
+    if real in (os.path.sep, os.path.realpath(os.path.expanduser("~"))):
+        raise Invalid(name + " may not be the filesystem root or the home directory")
+    if not os.path.exists(os.path.join(real, ".git")):
+        raise Invalid(name + " is not a git work tree (no .git)")
+    return real
 
 
 def key_field(value, name="key", kind=None, required=False):
@@ -691,7 +718,7 @@ def _payload_task(db, row):
         "parent": row["parent_key"], "sprint": row["sprint_key"],
         "capability": row["capability_key"], "goalDoc": row["goal_doc"],
         "triagedBy": row["triaged_by"], "jira_key": row["jira_key"],
-        "type": row["type"],
+        "repo": row["repo"], "type": row["type"],
     }
     out["type"] = type_of(out)
     # Always carried, stripped once by board(). The completeness check reads it,
@@ -1130,6 +1157,7 @@ TASK_PATCH = {
     "capability": ("capability_key", lambda v: key_field(v, "capability", "capability")),
     "goalDoc": ("goal_doc", lambda v: text(v, "goalDoc", MAX_REF)),
     "jira_key": ("jira_key", lambda v: text(v, "jira_key", 64, pattern=NAME_RE)),
+    "repo": ("repo", repo_field),
     "blockedReason": ("blocked_reason", lambda v: text(v, "blockedReason", 512)),
     "parkedReason": ("parked_reason", lambda v: text(v, "parkedReason", 512)),
 }

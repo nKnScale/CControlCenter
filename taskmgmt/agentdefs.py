@@ -287,7 +287,13 @@ def choose_roster(task, specs, cfg, cli_override=None, *, dependencies=None):
     dependencies maps board keys to blockedBy keys; callers resolve it, keeping
     selection independent of storage. C3 documents sizing, ranking and gaps.
     """
-    leads = sorted((s for s in specs.values() if s.role == "lead"), key=lambda s: s.name)
+    # A LEAD IS PICKED THE WAY WORKERS ARE: by the card's labels first, name last.
+    # It used to be the first lead in the alphabet, so with several teams' definitions
+    # installed every card got the same lead - an "omen" card was proposed agora-lead,
+    # the lead of an unrelated game project, because "agora" sorts first.
+    card_labels = set(task.get("labels") or [])
+    leads = sorted((s for s in specs.values() if s.role == "lead"),
+                   key=lambda s: (-len(card_labels & set(s.capabilities)), s.name))
     if leads:
         lead = leads[0]
         if cli_override and cli_override != lead.cli:

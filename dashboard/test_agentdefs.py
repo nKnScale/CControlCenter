@@ -242,6 +242,25 @@ class AgentDefinitions(unittest.TestCase):
         self.assertEqual([s.name for s in roster], ["lead", "senior-dev"])
         self.assertTrue(roster.gaps)
 
+    def test_the_lead_is_chosen_by_the_card_not_the_alphabet(self):
+        """With several teams' leads installed, every card got the first lead by name.
+
+        Found on TM-037, labelled omen/api/ot/data: it was proposed agora-lead - the
+        lead of an unrelated game project - over omen-lead, because "agora" sorts
+        first. Leads now rank the way workers do: label overlap first, name last.
+        """
+        self.write("agora-lead", extra="role: lead\ncapabilities: agora, gamedev\n")
+        self.write("omen-lead", extra="role: lead\ncapabilities: omen, ot, data\n")
+        specs = self.load()[0]
+        roster = ad.choose_roster({"labels": ["omen", "ot"]}, specs, {"teamMaxWorkers": 0})
+        self.assertEqual(roster[0].name, "omen-lead")
+        # No label overlap anywhere: still deterministic, still alphabetical.
+        roster = ad.choose_roster({"labels": ["unrelated"]}, specs, {"teamMaxWorkers": 0})
+        self.assertEqual(roster[0].name, "agora-lead")
+        self.assertEqual(roster, ad.choose_roster({"labels": ["unrelated"]},
+                                                  dict(reversed(list(specs.items()))),
+                                                  {"teamMaxWorkers": 0}))
+
     def test_a_well_matched_lead_does_not_hand_the_card_to_the_alphabet(self):
         """Workers were ranked only by what the LEAD lacks, so a lead that already
         covered the card left every candidate tied and `spec.name` decided.

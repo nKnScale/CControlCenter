@@ -258,8 +258,15 @@ def hire(db, body, *, bind_host=None):
         posture = spec.posture
         if os.environ.get("AGENTMUX_NO_BYPASS") == "1" and posture == "unrestricted":
             posture = "workspace-write"
+        # The card's own repo when it names one, re-validated now rather than
+        # trusted from when it was written; the harness repo otherwise. Never the wire.
+        try:
+            cwd = ccboard.repo_field(task.get("repo")) or str(dispatch.REPO)
+        except ccboard.Invalid as err:
+            raise ccboard.Refused("this card's repo cannot be used: " + str(err), [
+                {"field": "repo", "hint": f"agentmux task edit {key} --repo <git work tree>"}])
         member = dispatch.member_name(key, spec.role, row["position"] + 1)
-        args = ["spawn", member, "--cli", spec.cli, "--cwd", str(dispatch.REPO),
+        args = ["spawn", member, "--cli", spec.cli, "--cwd", cwd,
                 "--agentdef", spec.name, "--posture", posture,
                 "--team", key, "--role", spec.role]
         for flag, value in (("--model", spec.model), ("--auth", spec.auth),
